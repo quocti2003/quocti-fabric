@@ -1,0 +1,433 @@
+{
+  "properties": {
+    "activities": [
+      {
+        "type": "ForEach",
+        "typeProperties": {
+          "items": {
+            "value": "@activity('Lookup_PipelineMetadata').output.value",
+            "type": "Expression"
+          },
+          "activities": [
+            {
+              "type": "IfCondition",
+              "typeProperties": {
+                "expression": {
+                  "value": "@equals(item().load_type, 'incremental')",
+                  "type": "Expression"
+                },
+                "ifTrueActivities": [
+                  {
+                    "type": "Lookup",
+                    "typeProperties": {
+                      "source": {
+                        "type": "LakehouseTableSource",
+                        "sqlReaderQuery": {
+                          "value": "SELECT COALESCE(\n    (SELECT TOP 1 watermark_value\n     FROM etl.watermark\n     WHERE object_name = '@{concat('WWI_', item().source_schema, '_', item().source_table, '_TO_bronze_', item().target_table)}'\n     ORDER BY timestamp DESC),\n    '1900-01-01 00:00:00'\n) AS last_wm\n",
+                          "type": "Expression"
+                        },
+                        "partitionOption": "None"
+                      },
+                      "datasetSettings": {
+                        "type": "LakehouseTable",
+                        "typeProperties": {
+                          "schema": "etl",
+                          "table": "watermark"
+                        },
+                        "schema": [],
+                        "connectionSettings": {
+                          "name": "lh_wwi",
+                          "properties": {
+                            "type": "Lakehouse",
+                            "typeProperties": {
+                              "artifactId": "2c9cd4af-2fb7-9d4a-43a4-a97f3748fa11",
+                              "workspaceId": "00000000-0000-0000-0000-000000000000",
+                              "rootFolder": "Tables"
+                            },
+                            "externalReferences": {
+                              "connection": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
+                            },
+                            "annotations": []
+                          }
+                        },
+                        "annotations": []
+                      },
+                      "firstRowOnly": true
+                    },
+                    "policy": {
+                      "timeout": "0.12:00:00",
+                      "retry": 0,
+                      "retryIntervalInSeconds": 30,
+                      "secureInput": false,
+                      "secureOutput": false
+                    },
+                    "name": "Lookup_GetLastWatermark",
+                    "dependsOn": []
+                  },
+                  {
+                    "type": "Lookup",
+                    "typeProperties": {
+                      "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                          "value": "SELECT MAX(@{item().watermark_column}) as src_wm\nFROM @{item().source_schema}.@{item().source_table}",
+                          "type": "Expression"
+                        },
+                        "partitionOption": "None",
+                        "queryTimeout": "02:00:00"
+                      },
+                      "datasetSettings": {
+                        "type": "AzureSqlTable",
+                        "typeProperties": {
+                          "database": "WideWorldImporters-Standard"
+                        },
+                        "schema": [],
+                        "externalReferences": {
+                          "connection": "4909fe26-2923-40df-a0d7-7740db167cc4"
+                        },
+                        "annotations": []
+                      }
+                    },
+                    "policy": {
+                      "timeout": "0.12:00:00",
+                      "retry": 0,
+                      "retryIntervalInSeconds": 30,
+                      "secureInput": false,
+                      "secureOutput": false
+                    },
+                    "name": "Lookup_GetSourceWatermark",
+                    "dependsOn": []
+                  },
+                  {
+                    "type": "Copy",
+                    "typeProperties": {
+                      "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                          "value": "@{item().custom_query}\nWHERE @{item().watermark_column} > '@{activity('Lookup_GetLastWatermark').output.firstRow.last_wm}'\n  AND @{item().watermark_column} <= '@{activity('Lookup_GetSourceWatermark').output.firstRow.src_wm}'\n",
+                          "type": "Expression"
+                        },
+                        "partitionOption": "None",
+                        "additionalColumns": [
+                          {
+                            "name": "audit_ts",
+                            "value": {
+                              "value": "@utcNow()",
+                              "type": "Expression"
+                            }
+                          },
+                          {
+                            "name": "source_id",
+                            "value": {
+                              "value": "WWI",
+                              "type": "Expression"
+                            }
+                          }
+                        ],
+                        "isolationLevel": "ReadCommitted",
+                        "datasetSettings": {
+                          "type": "AzureSqlTable",
+                          "typeProperties": {
+                            "schema": {
+                              "value": "@item().source_schema",
+                              "type": "Expression"
+                            },
+                            "table": {
+                              "value": "@item().source_table",
+                              "type": "Expression"
+                            },
+                            "database": "WideWorldImporters-Standard"
+                          },
+                          "schema": [],
+                          "externalReferences": {
+                            "connection": "4909fe26-2923-40df-a0d7-7740db167cc4"
+                          },
+                          "annotations": []
+                        }
+                      },
+                      "sink": {
+                        "type": "ParquetSink",
+                        "formatSettings": {
+                          "type": "ParquetWriteSettings",
+                          "enableVertiParquet": true
+                        },
+                        "storeSettings": {
+                          "type": "AzureBlobStorageWriteSettings"
+                        },
+                        "datasetSettings": {
+                          "type": "Parquet",
+                          "typeProperties": {
+                            "location": {
+                              "type": "LakehouseLocation",
+                              "folderPath": {
+                                "value": "bronze/@{item().target_table}/@{formatDateTime(utcNow(),'yyyy/MM/dd')}",
+                                "type": "Expression"
+                              }
+                            },
+                            "compressionCodec": "snappy"
+                          },
+                          "schema": [],
+                          "connectionSettings": {
+                            "name": "lh_wwi",
+                            "properties": {
+                              "type": "Lakehouse",
+                              "typeProperties": {
+                                "artifactId": "2c9cd4af-2fb7-9d4a-43a4-a97f3748fa11",
+                                "workspaceId": "00000000-0000-0000-0000-000000000000",
+                                "rootFolder": "Files"
+                              },
+                              "externalReferences": {
+                                "connection": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
+                              },
+                              "annotations": []
+                            }
+                          },
+                          "annotations": []
+                        }
+                      },
+                      "translator": {
+                        "type": "TabularTranslator",
+                        "typeConversion": true,
+                        "typeConversionSettings": {
+                          "allowDataTruncation": true,
+                          "treatBooleanAsNumber": false
+                        }
+                      },
+                      "enableStaging": false
+                    },
+                    "policy": {
+                      "timeout": "0.12:00:00",
+                      "retry": 0,
+                      "retryIntervalInSeconds": 30,
+                      "secureInput": false,
+                      "secureOutput": false
+                    },
+                    "name": "Copy_BronzeIncremental",
+                    "dependsOn": [
+                      {
+                        "activity": "Lookup_GetLastWatermark",
+                        "dependencyConditions": [
+                          "Succeeded"
+                        ]
+                      },
+                      {
+                        "activity": "Lookup_GetSourceWatermark",
+                        "dependencyConditions": [
+                          "Succeeded"
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "TridentNotebook",
+                    "typeProperties": {
+                      "notebookId": "9a8b74e9-8b1d-8055-4998-474209725d00",
+                      "workspaceId": "00000000-0000-0000-0000-000000000000",
+                      "parameters": {
+                        "object_name": {
+                          "value": {
+                            "value": "@{concat('WWI_', item().source_schema, '_', item().source_table, '_TO_bronze_', item().target_table)}",
+                            "type": "Expression"
+                          },
+                          "type": "string"
+                        },
+                        "watermark_value": {
+                          "value": {
+                            "value": "@activity('Lookup_GetSourceWatermark').output.firstRow.src_wm",
+                            "type": "Expression"
+                          },
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "policy": {
+                      "timeout": "0.12:00:00",
+                      "retry": 0,
+                      "retryIntervalInSeconds": 30,
+                      "secureInput": false,
+                      "secureOutput": false
+                    },
+                    "name": "Notebook_UpdateWatermark",
+                    "dependsOn": [
+                      {
+                        "activity": "Copy_BronzeIncremental",
+                        "dependencyConditions": [
+                          "Succeeded"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "ifFalseActivities": [
+                  {
+                    "type": "Copy",
+                    "typeProperties": {
+                      "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                          "value": "@{item().custom_query}",
+                          "type": "Expression"
+                        },
+                        "partitionOption": "None",
+                        "additionalColumns": [
+                          {
+                            "name": "audit_ts",
+                            "value": {
+                              "value": "@utcNow()",
+                              "type": "Expression"
+                            }
+                          },
+                          {
+                            "name": "source_id",
+                            "value": {
+                              "value": "WWI",
+                              "type": "Expression"
+                            }
+                          }
+                        ],
+                        "isolationLevel": "ReadCommitted",
+                        "datasetSettings": {
+                          "type": "AzureSqlTable",
+                          "typeProperties": {
+                            "schema": {
+                              "value": "@item().source_schema",
+                              "type": "Expression"
+                            },
+                            "table": {
+                              "value": "@item().source_table",
+                              "type": "Expression"
+                            },
+                            "database": "WideWorldImporters-Standard"
+                          },
+                          "schema": [],
+                          "externalReferences": {
+                            "connection": "4909fe26-2923-40df-a0d7-7740db167cc4"
+                          },
+                          "annotations": []
+                        }
+                      },
+                      "sink": {
+                        "type": "ParquetSink",
+                        "formatSettings": {
+                          "type": "ParquetWriteSettings",
+                          "enableVertiParquet": true
+                        },
+                        "storeSettings": {
+                          "type": "AzureBlobStorageWriteSettings"
+                        },
+                        "datasetSettings": {
+                          "type": "Parquet",
+                          "typeProperties": {
+                            "location": {
+                              "type": "LakehouseLocation",
+                              "folderPath": {
+                                "value": "bronze/@{item().target_table}/@{formatDateTime(utcNow(),'yyyy/MM/dd')}",
+                                "type": "Expression"
+                              },
+                              "fileName": {
+                                "value": "data_@{formatDateTime(utcNow(),'yyyyMMddHHmmss')}.parquet",
+                                "type": "Expression"
+                              }
+                            },
+                            "compressionCodec": "snappy"
+                          },
+                          "schema": [],
+                          "connectionSettings": {
+                            "name": "lh_wwi",
+                            "properties": {
+                              "type": "Lakehouse",
+                              "typeProperties": {
+                                "artifactId": "2c9cd4af-2fb7-9d4a-43a4-a97f3748fa11",
+                                "workspaceId": "00000000-0000-0000-0000-000000000000",
+                                "rootFolder": "Files"
+                              },
+                              "externalReferences": {
+                                "connection": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
+                              },
+                              "annotations": []
+                            }
+                          },
+                          "annotations": []
+                        }
+                      },
+                      "translator": {
+                        "type": "TabularTranslator",
+                        "typeConversion": true,
+                        "typeConversionSettings": {
+                          "allowDataTruncation": true,
+                          "treatBooleanAsNumber": false
+                        }
+                      },
+                      "enableStaging": false
+                    },
+                    "policy": {
+                      "timeout": "0.12:00:00",
+                      "retry": 0,
+                      "retryIntervalInSeconds": 30,
+                      "secureInput": false,
+                      "secureOutput": false
+                    },
+                    "name": "Copy_BronzeFull",
+                    "dependsOn": []
+                  }
+                ]
+              },
+              "name": "If_LoadType",
+              "dependsOn": []
+            }
+          ]
+        },
+        "name": "ForEach_Tables",
+        "description": "Loop through all 4 tables",
+        "dependsOn": [
+          {
+            "activity": "Lookup_PipelineMetadata",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "Lookup",
+        "typeProperties": {
+          "source": {
+            "type": "LakehouseTableSource",
+            "sqlReaderQuery": "SELECT * FROM etl.pipeline_metadata WHERE is_active = 1",
+            "partitionOption": "None"
+          },
+          "datasetSettings": {
+            "type": "LakehouseTable",
+            "schema": [],
+            "connectionSettings": {
+              "name": "lh_wwi",
+              "properties": {
+                "type": "Lakehouse",
+                "typeProperties": {
+                  "artifactId": "2c9cd4af-2fb7-9d4a-43a4-a97f3748fa11",
+                  "workspaceId": "00000000-0000-0000-0000-000000000000",
+                  "rootFolder": "Tables"
+                },
+                "externalReferences": {
+                  "connection": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
+                },
+                "annotations": []
+              }
+            },
+            "annotations": []
+          },
+          "firstRowOnly": false
+        },
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false
+        },
+        "name": "Lookup_PipelineMetadata",
+        "dependsOn": []
+      }
+    ]
+  }
+}

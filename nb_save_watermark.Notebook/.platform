@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_save_watermark"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "9a8b74e9-8b1d-8055-4998-474209725d00"
+  }
+}
