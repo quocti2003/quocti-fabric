@@ -67,6 +67,7 @@ max_audit_row = silver_df.agg(
     spark_max("audit_ts").alias("max_silver_audit_ts")
 ).first()
 
+# max_silver_audit <=> the latest Bronze batch ingested into Silver table
 if max_audit_row["max_silver_audit_ts"] is None:
     max_silver_audit = "1900-01-01 00:00:00"
 else:
@@ -90,6 +91,7 @@ latest_per_key_window = Window.partitionBy(BUSINESS_KEY).orderBy(desc("audit_ts"
 
 tmp_silver = (
     silver_df
+    .filter(col("deleted_audit_ts").isNull()) 
     .withColumn("version_rank", row_number().over(latest_per_key_window))
     .filter(col("version_rank") == 1)
     .drop("version_rank")

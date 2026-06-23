@@ -47,20 +47,7 @@
           "secureOutput": false
         },
         "name": "silver_invoices",
-        "dependsOn": [
-          {
-            "activity": "silver_customers",
-            "dependencyConditions": [
-              "Succeeded"
-            ]
-          },
-          {
-            "activity": "silver_stockitems",
-            "dependencyConditions": [
-              "Succeeded"
-            ]
-          }
-        ]
+        "dependsOn": []
       },
       {
         "type": "TridentNotebook",
@@ -76,14 +63,7 @@
           "secureOutput": false
         },
         "name": "silver_invoicelines",
-        "dependsOn": [
-          {
-            "activity": "silver_invoices",
-            "dependencyConditions": [
-              "Succeeded"
-            ]
-          }
-        ]
+        "dependsOn": []
       }
     ]
   }
