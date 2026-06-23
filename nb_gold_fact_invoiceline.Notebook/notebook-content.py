@@ -35,18 +35,11 @@
 
 # CELL ********************
 
-#   - Header (silver.wwi_invoices) + detail (silver.wwi_invoicelines) flatten
-#   - Customer skey via SCD2 point-in-time join
-#   - StockItem skey via SCD1 simple join
-#   - DateKey derived from InvoiceDate
-#   - Delete-then-insert idempotency
-
 from pyspark.sql.functions import (
     col, lit, sha2, concat_ws, coalesce, trim,
     max as spark_max,
     row_number, desc,
-    year, month, dayofmonth,
-    date_format, expr
+    year, month, dayofmonth, date_format, expr
 )
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
@@ -54,22 +47,22 @@ from datetime import datetime
 
 
 # Source / target
-SILVER_HEADER  = "silver.wwi_invoices"        # invoice header
-SILVER_DETAIL  = "silver.wwi_invoicelines"    # invoice lines
+SILVER_HEADER  = "silver.wwi_invoices"
+SILVER_DETAIL  = "silver.wwi_invoicelines"
 DIM_CUSTOMER   = "gold.dim_customer"
 DIM_STOCKITEM  = "gold.dim_stockitem"
 GOLD_TABLE     = "gold.fact_invoiceline"
 WATERMARK_FLOW = "silver_wwi_invoices_TO_gold_fact_invoiceline"
 
-# Business key on fact = InvoiceLineID (line grain)
-FACT_KEY       = "InvoiceLineID"
+# Business key on fact
+FACT_KEY        = "InvoiceLineID"
 
-# Default skey for unresolved dim joins
-DEFAULT_SKEY   = -1
+# Sentinels
+DEFAULT_SKEY    = -1
 DEFAULT_DATEKEY = -1
-SOURCE_ID      = "WWI"
+SOURCE_ID       = "WWI"
 
-# Business cols used for row_hash (header + detail measures + dim skeys)
+# Hash cols
 HASH_COLS_HEADER = [
     "InvoiceID", "CustomerID", "InvoiceDate",
     "CustomerPurchaseOrderNumber", "IsCreditNote"
@@ -79,12 +72,8 @@ HASH_COLS_DETAIL = [
     "Quantity", "UnitPrice", "TaxRate", "TaxAmount",
     "LineProfit", "ExtendedPrice"
 ]
-
-# another table not original
-HASH_COLS_SKEY = [
-    "customer_skey", "stockitem_skey", "invoice_date_key"
-]
-HASH_COLS_ALL = HASH_COLS_HEADER + HASH_COLS_DETAIL + HASH_COLS_SKEY
+HASH_COLS_SKEY = ["customer_skey", "stockitem_skey", "invoice_date_key"]
+HASH_COLS_ALL  = HASH_COLS_HEADER + HASH_COLS_DETAIL + HASH_COLS_SKEY
 
 print(f"Loading: ({SILVER_HEADER} + {SILVER_DETAIL}) → {GOLD_TABLE}")
 
@@ -97,31 +86,28 @@ print(f"Loading: ({SILVER_HEADER} + {SILVER_DETAIL}) → {GOLD_TABLE}")
 
 # CELL ********************
 
-# - max_fact_audit: when this flow last ran
-# - current_audit_ts: this batch's time (frozen, applied to all new rows)
-# - max_existing_skey: highest invoice_line_skey already used
+# ============================================================
+# PHASE 1 — Read CURRENT Fact state
+# ============================================================
+fact_before_insert = spark.read.table(GOLD_TABLE)
 
-fact_df = spark.read.table(GOLD_TABLE)
-
-max_audit_row = fact_df.agg(
-    spark_max("audit_ts").alias("max_fact_audit_ts")
-).first()
-
-if max_audit_row["max_fact_audit_ts"] is None:
+# (1) Marker
+max_fact_audit = (
+    fact_before_insert.agg(spark_max("audit_ts").alias("m")).first()["m"]
+)
+if max_fact_audit is None:
     max_fact_audit = "1900-01-01 00:00:00"
 else:
-    max_fact_audit = str(max_audit_row["max_fact_audit_ts"])
+    max_fact_audit = str(max_fact_audit)
+print(f"Max Fact audit_ts (marker): {max_fact_audit}")
 
-print(f"Max Fact audit_ts: {max_fact_audit}")
-
-
-current_audit_ts = datetime.now()
-print(f"Current Fact batch audit_ts: {current_audit_ts}")
-
-
-max_skey_row = fact_df.agg(spark_max("invoice_line_skey").alias("max_skey")).first()
-max_existing_skey = max_skey_row["max_skey"] if max_skey_row["max_skey"] is not None else 0
-print(f"Max existing invoice_line_skey: {max_existing_skey} (new skeys start at {max_existing_skey + 1})")
+# (2) Max existing skey
+max_existing_skey = (
+    fact_before_insert.agg(spark_max("invoice_line_skey").alias("m")).first()["m"]
+)
+if max_existing_skey is None:
+    max_existing_skey = 0
+print(f"Max existing invoice_line_skey: {max_existing_skey}")
 
 # METADATA ********************
 
@@ -132,57 +118,40 @@ print(f"Max existing invoice_line_skey: {max_existing_skey} (new skeys start at 
 
 # CELL ********************
 
-# BUILD tmp_invoices — header latest active per InvoiceID
-# Same DEDUP pattern as incremental Silver load.
+# ============================================================
+# PHASE 2 — Read Silver delta (invoices + invoicelines)
+# ============================================================
+# FIX: Rank FIRST, then filter deleted AFTER (same pattern as dim_customer)
 
-invoices_silver = spark.read.table(SILVER_HEADER)
-
-invoices_recent = (
-    invoices_silver
-    .filter(col("audit_ts") > lit(max_fact_audit))
-    .filter(col("deleted_audit_ts").isNull())
-)
+# ─── Invoices header ───
+silver_invoices = spark.read.table(SILVER_HEADER)
+inv_recent = silver_invoices.filter(col("audit_ts") > lit(max_fact_audit))
 
 inv_window = Window.partitionBy("InvoiceID").orderBy(desc("audit_ts"))
-
 tmp_invoices = (
-    invoices_recent
+    inv_recent
     .withColumn("version_rank", row_number().over(inv_window))
     .filter(col("version_rank") == 1)
+    .filter(col("deleted_audit_ts").isNull())          # ← FIX: filter AFTER rank
     .drop("version_rank")
 )
+print(f"Latest invoices since marker: {tmp_invoices.count()} rows")
 
-print(f"Header rows in tmp_invoices: {tmp_invoices.count()}")
 
-# METADATA ********************
+# ─── InvoiceLines detail ───
+silver_lines = spark.read.table(SILVER_DETAIL)
+line_recent = silver_lines.filter(col("audit_ts") > lit(max_fact_audit))
 
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# BUILD tmp_invoicelines — detail latest active per InvoiceLineID
-
-invoicelines_silver = spark.read.table(SILVER_DETAIL)
-
-invoicelines_recent = (
-    invoicelines_silver
-    .filter(col("audit_ts") > lit(max_fact_audit))
-    .filter(col("deleted_audit_ts").isNull())
-)
-
-line_window = Window.partitionBy(FACT_KEY).orderBy(desc("audit_ts"))
-
+line_window = Window.partitionBy("InvoiceLineID").orderBy(desc("audit_ts"))
 tmp_invoicelines = (
-    invoicelines_recent
+    line_recent
     .withColumn("version_rank", row_number().over(line_window))
     .filter(col("version_rank") == 1)
+    .filter(col("deleted_audit_ts").isNull())          # ← FIX: filter AFTER rank
     .drop("version_rank")
 )
+print(f"Latest invoicelines since marker: {tmp_invoicelines.count()} rows")
 
-print(f"Detail rows in tmp_invoicelines: {tmp_invoicelines.count()}")
 
 # METADATA ********************
 
@@ -193,25 +162,11 @@ print(f"Detail rows in tmp_invoicelines: {tmp_invoicelines.count()}")
 
 # CELL ********************
 
-# FLATTEN + RESOLVE DIM SKEYS
-# Take Silver header + detail, join them into line-grain rows, then resolve the 3 dim surrogate keys (customer, stockitem, date).
-# Steps:
-#   INNER JOIN header + detail on InvoiceID → line grain with header attrs
-#   LEFT JOIN dim_customer (SCD2 point-in-time on InvoiceDate)
-#     Condition: dim.CustomerID = h.CustomerID
-#       AND h.InvoiceDate > dim.scd_from
-#       AND h.InvoiceDate <= dim.scd_to
-#   LEFT JOIN dim_stockitem (SCD1 simple join on StockItemID)
-#   Derive invoice_date_key from InvoiceDate (YYYYMMDD int)
-#   COALESCE all skeys to -1 if no match (so fact never has NULL FK)
-#   Compute row_hash
+# ============================================================
+# PHASE 3 — Flatten header+detail + Resolve dim skeys + row_hash
+# ============================================================
 
-# Load dims
-dim_customer  = spark.read.table(DIM_CUSTOMER)
-dim_stockitem = spark.read.table(DIM_STOCKITEM)
-
-
-# header + detail flatten
+# (1) Header + detail INNER JOIN
 header_detail = (
     tmp_invoices.alias("h")
     .join(
@@ -220,94 +175,85 @@ header_detail = (
         how="inner"
     )
     .select(
-        # natural keys
-        col("h.InvoiceID").alias("InvoiceID"),
-        col("d.InvoiceLineID").alias("InvoiceLineID"),
-        # header attrs (carry to fact)
-        col("h.CustomerID").alias("CustomerID"),
-        col("h.InvoiceDate").alias("InvoiceDate"),
-        col("h.CustomerPurchaseOrderNumber").alias("CustomerPurchaseOrderNumber"),
-        col("h.IsCreditNote").alias("IsCreditNote"),
-        # detail attrs + measures
-        col("d.StockItemID").alias("StockItemID"),
-        col("d.Description").alias("Description"),
-        col("d.PackageTypeID").alias("PackageTypeID"),
-        col("d.Quantity").alias("Quantity"),
-        col("d.UnitPrice").alias("UnitPrice"),
-        col("d.TaxRate").alias("TaxRate"),
-        col("d.TaxAmount").alias("TaxAmount"),
-        col("d.LineProfit").alias("LineProfit"),
-        col("d.ExtendedPrice").alias("ExtendedPrice"),
+        col("d.InvoiceLineID"),
+        col("h.InvoiceID"),
+        col("h.CustomerID"),
+        col("h.InvoiceDate"),
+        col("h.CustomerPurchaseOrderNumber"),
+        col("h.IsCreditNote"),
+        col("d.StockItemID"),
+        col("d.Description"),
+        col("d.PackageTypeID"),
+        col("d.Quantity"),
+        col("d.UnitPrice"),
+        col("d.TaxRate"),
+        col("d.TaxAmount"),
+        col("d.LineProfit"),
+        col("d.ExtendedPrice")
     )
 )
 
+# (2) Resolve customer_skey via SCD2 point-in-time
+dim_customer = spark.read.table(DIM_CUSTOMER) \
+    .filter(col("customer_skey") != DEFAULT_SKEY) \
+    .select("customer_skey", "CustomerID", "scd_from", "scd_to")
 
-# SCD2 point-in-time join → customer_skey
 flat_with_customer = (
     header_detail.alias("f")
     .join(
         dim_customer.alias("dc"),
         (col("dc.CustomerID") == col("f.CustomerID")) &
         (col("f.InvoiceDate") > col("dc.scd_from")) &
-        (col("f.InvoiceDate") <= col("dc.scd_to"))
-        how="left"
-    )
-    .select( 
-        col("f.*"),
-        coalesce(col("dc.customer_skey"), -1)
-    )
-)
-
-
-# SCD1 simple join → stockitem_skey
-flat_with_stockitem = (
-    flat_with_customer.alias("f")
-    .join(
-        dim_stockitem.alias("ds"),
-        (col("ds.StockItemID") == col("f.StockItemID")) &
-        (col("ds.stockitem_skey") != DEFAULT_SKEY),
+        (col("f.InvoiceDate") <= col("dc.scd_to")),     # ← FIX: comma added
         how="left"
     )
     .select(
         col("f.*"),
-        col("ds.stockitem_skey")
+        coalesce(col("dc.customer_skey"), lit(DEFAULT_SKEY)).cast("int").alias("customer_skey")
     )
 )
 
+# (3) Resolve stockitem_skey via SCD1 simple join
+dim_stockitem = spark.read.table(DIM_STOCKITEM) \
+    .filter(col("stockitem_skey") != DEFAULT_SKEY) \
+    .select("stockitem_skey", "StockItemID")
 
-# derive invoice_date_key + COALESCE skeys to -1
-flat_final = (
-    flat_with_stockitem
-    # Date key from InvoiceDate: YYYYMMDD
-    .withColumn(
-        "invoice_date_key",
-        coalesce(
-            (year("InvoiceDate") * 10000 + month("InvoiceDate") * 100 + dayofmonth("InvoiceDate")).cast("int"),
-            lit(DEFAULT_DATEKEY)
-        )
+flat_with_stockitem = (
+    flat_with_customer.alias("f")
+    .join(
+        dim_stockitem.alias("ds"),
+        on=col("f.StockItemID") == col("ds.StockItemID"),
+        how="left"
     )
-    # Skey COALESCE to -1 for unmatched
-    .withColumn("customer_skey",  coalesce(col("customer_skey"),  lit(DEFAULT_SKEY)).cast("int"))
-    .withColumn("stockitem_skey", coalesce(col("stockitem_skey"), lit(DEFAULT_SKEY)).cast("int"))
+    .select(
+        col("f.*"),
+        coalesce(col("ds.stockitem_skey"), lit(DEFAULT_SKEY)).cast("int").alias("stockitem_skey")
+    )
 )
 
+# (4) Derive invoice_date_key (YYYYMMDD)
+flat_with_datekey = flat_with_stockitem.withColumn(
+    "invoice_date_key",
+    (year("InvoiceDate") * 10000 + month("InvoiceDate") * 100 + dayofmonth("InvoiceDate")).cast("int")
+)
 
-# compute row_hash
-def safe_str(column_name):
-    return coalesce(trim(col(column_name).cast("string")), lit("^"))
+# (5) Compute row_hash
+def safe_str(c):
+    return coalesce(trim(col(c).cast("string")), lit("^"))
 
-flat_final = flat_final.withColumn(
+flat_final = flat_with_datekey.withColumn(
     "row_hash",
     sha2(concat_ws("|", *[safe_str(c) for c in HASH_COLS_ALL]), 256)
 )
 
-print(f"Flattened + dim-resolved rows: {flat_final.count()}")
+total_to_insert = flat_final.count()
+print(f"Fact rows to load: {total_to_insert}")
 
-# Quick sanity check: how many rows have unresolved skeys (= -1)?
+# Sanity check unresolved skeys
 unresolved_customer  = flat_final.filter(col("customer_skey")  == DEFAULT_SKEY).count()
 unresolved_stockitem = flat_final.filter(col("stockitem_skey") == DEFAULT_SKEY).count()
-print(f"Unresolved customer_skey  (= -1): {unresolved_customer}")
-print(f"Unresolved stockitem_skey (= -1): {unresolved_stockitem}")
+print(f"Unresolved customer_skey:  {unresolved_customer}")
+print(f"Unresolved stockitem_skey: {unresolved_stockitem}")
 
 # METADATA ********************
 
@@ -318,55 +264,36 @@ print(f"Unresolved stockitem_skey (= -1): {unresolved_stockitem}")
 
 # CELL ********************
 
-# DELETE existing fact rows via Delta MERGE (production-grade)
-# Distributed — no .collect() to driver, scales to millions of rows.
-# Before inserting new fact rows, delete any existing fact rows that share the same InvoiceLineID as our batch.
-# This is the "delete" half of the delete-then-insert pattern.
-if flat_final.count() > 0:
-    fact_delta = DeltaTable.forName(spark, GOLD_TABLE)
+# ============================================================
+# PHASE 4 — Stamp batch + Delete-then-insert pattern
+# ============================================================
 
-    # Build a small DataFrame of just the keys to delete (distinct, distributed)
-    keys_to_delete = flat_final.select(FACT_KEY).distinct()
+current_audit_ts = datetime.now()
+print(f"Current Fact batch audit_ts: {current_audit_ts}")
 
-    # MERGE: match by key, delete matched rows
-    fact_delta.alias("tgt").merge(
-        keys_to_delete.alias("src"),
-        f"tgt.{FACT_KEY} = src.{FACT_KEY}"
-    ).whenMatchedDelete().execute()
-
-    print(f"Deleted existing fact rows matching {keys_to_delete.count()} InvoiceLineIDs")
-else:
-    print("No InvoiceLineIDs to delete")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# ALLOCATE invoice_line_skey + INSERT into fact
-# - Skey starts at max_existing_skey + 1, assigned via row_number()
-# - Uses LongType (more headroom than IntegerType for fact volumes)
-
-total_to_insert = flat_final.count()
 
 if total_to_insert > 0:
+    # ─── Step 1: DELETE existing fact rows in batch (idempotent) ───
+    delta_fact = DeltaTable.forName(spark, GOLD_TABLE)
+    delta_fact.alias("tgt").merge(
+        flat_final.select(FACT_KEY).alias("src"),
+        f"tgt.{FACT_KEY} = src.{FACT_KEY}"
+    ).whenMatchedDelete().execute()
+    print(f"Deleted prior fact rows for {total_to_insert} InvoiceLineIDs")
+
+
+    # ─── Step 2: Allocate skeys + add audit cols ───
     skey_window = Window.orderBy(FACT_KEY)
 
     fact_with_skey = (
         flat_final
-        .withColumn(
-            "invoice_line_skey",
-            (lit(max_existing_skey) + row_number().over(skey_window)).cast("long")
-        )
+        .withColumn("invoice_line_skey",
+                    (lit(max_existing_skey) + row_number().over(skey_window)).cast("long"))
         .withColumn("audit_ts",  lit(current_audit_ts).cast("timestamp"))
         .withColumn("source_id", lit(SOURCE_ID))
     )
 
-    # Final column order — must match DDL
+    # ─── Step 3: Reorder cols + INSERT ───
     ALL_FACT_COLS = [
         "invoice_line_skey",
         "InvoiceID", "InvoiceLineID",
@@ -381,12 +308,10 @@ if total_to_insert > 0:
 
     fact_with_skey.select(*ALL_FACT_COLS) \
         .write.format("delta").mode("append").saveAsTable(GOLD_TABLE)
-
     print(f"Inserted {total_to_insert} fact rows "
           f"(skeys {max_existing_skey + 1} → {max_existing_skey + total_to_insert})")
 else:
-    print("No rows to insert — flat_final is empty")
-
+    print("No new fact rows to load")
 
 # METADATA ********************
 
@@ -397,9 +322,9 @@ else:
 
 # CELL ********************
 
-# SAVE WATERMARK + VERIFY
-
-# Watermark value = max audit_ts consumed from Silver (header table, drives this flow)
+# ============================================================
+# PHASE 5 — Save watermark + Verify
+# ============================================================
 max_silver_audit_consumed = (
     spark.read.table(SILVER_HEADER)
     .filter(col("audit_ts") > lit(max_fact_audit))
@@ -415,50 +340,23 @@ if max_silver_audit_consumed is not None:
     watermark_df.write.format("delta").mode("append").saveAsTable("etl.watermark")
     print(f"Watermark saved: {WATERMARK_FLOW} = {max_silver_audit_consumed}")
 else:
-    print("No new Silver header rows consumed — skipping watermark save")
-
+    print("No new Silver rows consumed — skipping watermark save")
 
 # Verify
 result = spark.read.table(GOLD_TABLE)
-
-total            = result.count()
-unresolved_cust  = result.filter(col("customer_skey")  == DEFAULT_SKEY).count()
-unresolved_stk   = result.filter(col("stockitem_skey") == DEFAULT_SKEY).count()
-unresolved_date  = result.filter(col("invoice_date_key") == DEFAULT_DATEKEY).count()
-
-total_revenue    = result.agg(
-    spark_max("ExtendedPrice").alias("max_ext"),
-    spark_max("Quantity").alias("max_qty")
-).first()
-
-revenue_sum_df = spark.sql(f"""
-    SELECT
-        SUM(ExtendedPrice) AS total_extended_price,
-        SUM(Quantity)      AS total_quantity,
-        COUNT(DISTINCT InvoiceID) AS unique_invoices,
-        COUNT(DISTINCT customer_skey) AS unique_customers,
-        COUNT(DISTINCT stockitem_skey) AS unique_stockitems
-    FROM {GOLD_TABLE}
-""")
+total = result.count()
+unresolved_cust = result.filter(col("customer_skey") == DEFAULT_SKEY).count()
+unresolved_stk  = result.filter(col("stockitem_skey") == DEFAULT_SKEY).count()
+unresolved_date = result.filter(col("invoice_date_key") == DEFAULT_DATEKEY).count()
+revenue = result.agg({"ExtendedPrice": "sum"}).first()[0]
 
 print(f"\n=== Total fact rows: {total} ===")
-print(f"Unresolved customer_skey  (= -1): {unresolved_cust}")
-print(f"Unresolved stockitem_skey (= -1): {unresolved_stk}")
-print(f"Unresolved invoice_date_key (= -1): {unresolved_date}")
+print(f"Unresolved customer_skey:    {unresolved_cust}")
+print(f"Unresolved stockitem_skey:   {unresolved_stk}")
+print(f"Unresolved invoice_date_key: {unresolved_date}")
+print(f"Total ExtendedPrice (revenue): {revenue}")
 
-print("\n=== Revenue summary ===")
-display(revenue_sum_df)
-
-print("\n=== Sample 5 fact rows ===")
-display(
-    result.select(
-        "invoice_line_skey", "InvoiceID", "InvoiceLineID",
-        "customer_skey", "stockitem_skey", "invoice_date_key",
-        "InvoiceDate", "Quantity", "ExtendedPrice"
-    )
-    .orderBy("invoice_line_skey")
-    .limit(5)
-)
+display(result.limit(5))
 
 
 # METADATA ********************

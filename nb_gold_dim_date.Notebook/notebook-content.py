@@ -129,11 +129,7 @@ dim_date_df = (
     # DayOfYear
     .withColumn("DayOfYear", dayofyear("Date"))
 
-    # WeekOfMonth (BizOne formula: week-of-year minus week-of-1st-of-month + 1)
-    .withColumn(
-        "WeekOfMonth",
-        weekofyear("Date") - weekofyear(trunc("Date", "MM")) + 1
-    )
+    .withColumn("WeekOfMonth", (floor((dayofmonth("Date") - 1) / 7) + 1).cast("int"))
 
     # WeekOfYear (ISO week)
     .withColumn("WeekOfYear", weekofyear("Date"))
