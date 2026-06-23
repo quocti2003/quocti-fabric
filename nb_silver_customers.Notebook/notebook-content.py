@@ -25,7 +25,7 @@
 # Read Bronze: Get the lates batch not consumed to Silver layer, just the latest audit_ts in Bronze
 # Compare to the current Silver state
 #   + BK + same hash -> SKIP, do nothing
-#   + BK + different hash -> insert new version (append only not update or delete old rows)
+#   + BK + different hash -> insert new updated version (append-only not update or delete old rows)
 #   + Bronze has this BK, but Silver not -> insert new BK
 #   + Silver has this BK, but Bronze not -> mark soft-delete
 # Still keep history, avoid duplicate
@@ -65,7 +65,7 @@ BUSINESS_COLS = [
     "PrimaryContactPersonID", "DeliveryCityID", "PostalCityID",
     "CreditLimit", "AccountOpenedDate", "PhoneNumber", "FaxNumber",
     "WebsiteURL", "DeliveryAddressLine1", "DeliveryAddressLine2",
-    "IsOnCreditHold", "LastEditedBy"
+    "IsOnCreditHold", "LastEditedBy",
 ]
 
 # (key + business + meta)
@@ -75,7 +75,6 @@ ALL_SILVER_COLS = [BUSINESS_KEY] + BUSINESS_COLS + [
     "source_id",         
     "row_hash"           
 ]
-
 
 # METADATA ********************
 
@@ -92,16 +91,16 @@ ALL_SILVER_COLS = [BUSINESS_KEY] + BUSINESS_COLS + [
 # - Fallback '1900-01-01' if Silver is empty (for 1st run)
 # - Purpose for: lower bound filter 
 
-# silver_df = all history rows (total), many versions per business key
+# silver_df = all history rows (total) existed in silver table, many versions per business key
+# max_audit_row["m"]      # → datetime(2026, 6, 18, 14, 0, 0)
+# max_audit_row.m         # → datetime(2026, 6, 18, 14, 0, 0)
 silver_df = spark.read.table(SILVER_TABLE)
-max_audit_row = silver_df.agg(spark_max("audit_ts").alias("m")).first()
+max_audit_row = silver_df.agg(spark_max("audit_ts").alias("m")).first() # find the MAX(audit_ts) across ALL Silver rows, return as a 1-row object
 
 if max_audit_row["m"] is None:
-    max_silver_audit = "1900-01-01 00:00:00"
+    max_silver_audit = "1900-01-01 00:00:00" # the audit_ts of the most recent Silver INSERT batch
 else:
     # Convert datetime → string for using filter lit()
-    # when the last time Silver consumed Bronze, 
-    # or filter which Bronze batches havent' consumed into Silver layer
     # max_silver_audit = the nearest previous timestamp Silver run
     max_silver_audit = str(max_audit_row["m"]) 
     print(f"Silver has consumed Bronze up to: {max_silver_audit}")
@@ -128,8 +127,7 @@ print(f"Current Silver batch audit_ts (this run): {current_audit_ts}")
 
 # CELL ********************
 
-# tmp_silver — latest state Silver
-# tmp_silver - latest version per key 
+# tmp_silver — latest state Silver, latest version per key 
 # When comparing with Bronze to detect CHANGED, we must compare Bronze against the CURRENT STATE of Silver — i.e. the latest version of each customer, not an old version.
 
 # Silver INSERT-only will have many row per CustomerID (history).
@@ -141,8 +139,10 @@ window_silver = Window.partitionBy(BUSINESS_KEY).orderBy(desc("audit_ts"))
 
 # tmp_silver total rows with full columns (latest version per business key)
 # current_state per-businesskey latest, because they do not uniformed timestamp
+# tmp_silver represents the CURRENT STATE of Silver
 tmp_silver = (
     silver_df
+    .filter(col("deleted_audit_ts").isNull())
     .withColumn("rn", row_number().over(window_silver))   # mark rank number for each row
     .filter(col("rn") == 1)                                # keep the latest version
     .drop("rn")                                            # drop helper column
@@ -172,12 +172,13 @@ bronze_df = spark.read.option("recursiveFileLookup", "true").parquet(BRONZE_PATH
 # max_bronze_audit = latest timestamp batch ingested in Bronze
 # Full load: we just need batch latest (1 file = full snapshot source)
 # in etl.watermark -> to know when silver run, consumed Bronze up to which batch
+# MAX(audit_ts) across all Bronze parquet files = timestamp of the latest Bronze batch existed
 max_bronze_audit_row = bronze_df.agg(spark_max("audit_ts").alias("m")).first()
 max_bronze_audit = max_bronze_audit_row["m"]
 print(f"Max Bronze audit_ts (latest batch): {max_bronze_audit}")
 
 
-# filter Latest Batch only + not consume yet
+# filter Latest Batch only 
 # max_bronze_audit: the latest batch ingested in Bronze (full snapshot)
 tmp_bronze = bronze_df.filter(
     (col("audit_ts") > lit(max_silver_audit)) &
@@ -207,11 +208,13 @@ tmp_bronze = (
 )
 
 
-# compute row_hash 
+# compute row_hash for detect change
 # - '^' (caret) sentinel: distinguished NULL with empty string ''
 # - '|' delimiter: avoid "AB"+"C" collision with "A"+"BC"
 # - string cast to uniformed data type
 # → 64-char hex string per row (256-bit hash)
+# Convert a column value into a safe string for hashing — distinguishing NULL from empty/whitespace.
+# Simply, NULL "^" and empty string will be ""
 def safe_str(c):
     return coalesce(trim(col(c).cast("string")), lit("^"))
 
@@ -225,7 +228,6 @@ tmp_bronze = tmp_bronze.withColumn(
 )
 
 print(f"Latest Bronze batch (after filter + hash): {tmp_bronze.count()} rows")
-display(tmp_silver)
 
 # METADATA ********************
 
@@ -242,9 +244,13 @@ display(tmp_silver)
 # - Filter different row_hash => updated
 # - Select columns are inserted from Bronze
 # - solve n business key.
+
+
 changed_df = (
+    # Latest Batch only from Bronze layer
     tmp_bronze.alias("brz")
     .join(
+        # tmp_silver total rows with full columns (latest version per business key)
         tmp_silver.alias("slv"),
         on=col(f"brz.{BUSINESS_KEY}") == col(f"slv.{BUSINESS_KEY}"),
         how="inner"   
@@ -295,9 +301,10 @@ print(f"Inserted CHANGED versions: {updated_count} rows")
 # Find new keys Silver havent' had yet
 # - LEFT ANTI JOIN: keys in Bronze but it hasn't had in Silver
 new_df = (
+    # Latest Batch only from Bronze layer
     tmp_bronze.alias("brz")
     .join(
-        tmp_silver.alias("slv").select(BUSINESS_KEY),  
+        tmp_silver.alias("slv").select(BUSINESS_KEY),   # tmp_silver total rows with full columns (latest version per business key)
         on=BUSINESS_KEY,
         how="left_anti"   # left anti = "in left, NOT in right"
     )
@@ -307,7 +314,7 @@ new_df = (
 # add meta cols + reorder
 new_to_insert = (
     new_df
-    .withColumn("audit_ts", lit(current_audit_ts).cast("timestamp"))
+    .withColumn("audit_ts", lit(current_audit_ts).cast("timestamp")) #  fill value into column
     .withColumn("deleted_audit_ts", lit(None).cast("timestamp"))
     .select(*ALL_SILVER_COLS)
 )
@@ -399,7 +406,7 @@ else:
 # SAVE WATERMARK 
 # - timestamp: current_timestamp()
 # - object_name: WATERMARK_FLOW
-# - watermark_value: timestamp of latest batch in bronze consumed in Silver
+# - watermark_value: timestamp of latest Bronze batch consumed in Silver this run
 watermark_data = [(
     datetime.now(),
     WATERMARK_FLOW,

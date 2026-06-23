@@ -85,6 +85,7 @@ max_audit_row = silver_df.agg(
     spark_max("audit_ts").alias("max_silver_audit_ts")
 ).first()
 
+# max_silver_audit <=> MAX(audit_ts) Silver <=> the latest Bronze batch ingested into Silver
 if max_audit_row["max_silver_audit_ts"] is None:
     # Silver empty → fallback so every Bronze row passes the filter
     max_silver_audit = "1900-01-01 00:00:00"
@@ -115,6 +116,7 @@ latest_per_key_window = Window.partitionBy(BUSINESS_KEY).orderBy(desc("audit_ts"
 
 tmp_silver = (
     silver_df
+    .filter(col("deleted_audit_ts").isNull())
     .withColumn("version_rank", row_number().over(latest_per_key_window))
     .filter(col("version_rank") == 1)
     .drop("version_rank")
@@ -168,6 +170,8 @@ print(f"Max Bronze audit_ts: {max_bronze_audit}")
 #   Just keep the 2026-05-15 row only.
 dedup_window = Window.partitionBy(BUSINESS_KEY).orderBy(desc(DEDUP_ORDER_COL))
 
+# audit_ts <=> means when Bronze pipeline wrote this row to parquet files (@utcNow() at pipeline run time)
+# LastEditedWhen <=> when source SQL edited, because the thing we need is the latest source state, not when did Bronze ingest this
 tmp_bronze = (
     tmp_bronze_raw
     .withColumn("version_rank", row_number().over(dedup_window))

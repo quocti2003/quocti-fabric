@@ -36,18 +36,14 @@ for schema in ['bronze', 'silver', 'gold', 'etl']:
 # CELL ********************
 
 spark.sql("""
-CREATE TABLE etl.pipeline_metadata (
-    source_schema     STRING,
-    source_table      STRING,
-    target_table      STRING,
-    load_type         STRING,
-    watermark_column  STRING,
-    business_key      STRING,
-    custom_query      STRING,
-    is_active         BOOLEAN
-) USING DELTA
+    create table if not exists etl.watermark (
+        timestamp timestamp not null,
+        object_name string not null,
+        watermark_value string
+    )
+    using delta
 """)
-print("Created etl.pipeline_metadata")
+print(f"Created etl.watermark")
 
 # METADATA ********************
 
@@ -58,31 +54,25 @@ print("Created etl.pipeline_metadata")
 
 # CELL ********************
 
+spark.sql("DROP TABLE IF EXISTS etl.pipeline_metadata")
 spark.sql("""
-INSERT INTO etl.pipeline_metadata VALUES
-
--- Full: Customers
-('Sales', 'Customers', 'wwi_customers', 'full', NULL, 'CustomerID',
- 'SELECT CustomerID, CustomerName, BillToCustomerID, CustomerCategoryID, PrimaryContactPersonID, DeliveryCityID, PostalCityID, CreditLimit, AccountOpenedDate, PhoneNumber, FaxNumber, WebsiteURL, DeliveryAddressLine1, DeliveryAddressLine2, IsOnCreditHold, LastEditedBy FROM Sales.Customers',
- true),
-
--- Full: StockItems
-('Warehouse', 'StockItems', 'wwi_stockitems', 'full', NULL, 'StockItemID',
- 'SELECT StockItemID, StockItemName, SupplierID, ColorID, UnitPackageID, Brand, Size, TaxRate, UnitPrice, RecommendedRetailPrice, Barcode, Tags, CustomFields, SearchDetails, LastEditedBy FROM Warehouse.StockItems',
- true),
-
--- Incremental: Invoices (custom_query no WHERE query)
-('Sales', 'Invoices', 'wwi_invoices', 'incremental', 'LastEditedWhen', 'InvoiceID',
- 'SELECT * FROM Sales.Invoices',
- true),
-
--- Incremental: InvoiceLines
-('Sales', 'InvoiceLines', 'wwi_invoicelines', 'incremental', 'LastEditedWhen', 'InvoiceLineID',
- 'SELECT * FROM Sales.InvoiceLines',
- true)
+    create table if not exists etl.pipeline_metadata (
+        source_system string not null,
+        source_schema string not null,
+        source_table string not null,
+        target_schema string not null,
+        target_table string not null,
+        load_type string not null,
+        watermark_column string, 
+        dedup_column string,
+        business_keys array<string> not null,
+        columns_list array<string> not null,
+        custom_query string not null,
+        is_active boolean not null
+    )
+    using delta
 """)
-
-display(spark.sql("SELECT source_table, load_type, custom_query FROM etl.pipeline_metadata"))
+print(f"Created etl.pipeline_metadata (rows: {spark.read.table('etl.pipeline_metadata').count()})")
 
 # METADATA ********************
 
@@ -93,14 +83,62 @@ display(spark.sql("SELECT source_table, load_type, custom_query FROM etl.pipelin
 
 # CELL ********************
 
-spark.sql("""
-CREATE TABLE etl.watermark (
-    timestamp        TIMESTAMP,
-    object_name      STRING,
-    watermark_value  STRING
-) USING DELTA
-""")
-print("Created etl.watermark (empty)")
+existing_count = spark.read.table("etl.pipeline_metadata").count()
+
+if existing_count == 0:
+    spark.sql("""
+        INSERT INTO etl.pipeline_metadata VALUES
+
+        -- full load: Customers (skip GeographyDeliveryLocation)
+        ('WWI', 'dbo', 'customers', 'bronze', 'wwi_customers', 'full', NULL, NULL,
+        ARRAY('CustomerID'),
+        ARRAY('CustomerName', 'BillToCustomerID', 'CustomerCategoryID', 'PrimaryContactPersonID', 'DeliveryCityID', 'PostalCityID', 'CreditLimit', 'AccountOpenedDate', 'PhoneNumber', 'FaxNumber', 'WebsiteURL', 'DeliveryAddressLine1', 'DeliveryAddressLine2', 'IsOnCreditHold', 'LastEditedBy'),
+        'SELECT CustomerID, CustomerName, BillToCustomerID, CustomerCategoryID, PrimaryContactPersonID, DeliveryCityID, PostalCityID, CreditLimit, AccountOpenedDate, PhoneNumber, FaxNumber, WebsiteURL, DeliveryAddressLine1, DeliveryAddressLine2, IsOnCreditHold, LastEditedBy FROM dbo.customers',
+        true),
+
+        -- full load: StockItems (skip Photo varbinary)
+        ('WWI', 'dbo', 'stockitems', 'bronze', 'wwi_stockitems', 'full', NULL, NULL,
+        ARRAY('StockItemID'),
+        ARRAY('StockItemName', 'SupplierID', 'ColorID', 'UnitPackageID', 'Brand', 'Size', 'TaxRate', 'UnitPrice', 'RecommendedRetailPrice', 'Barcode', 'Tags', 'CustomFields', 'SearchDetails', 'LastEditedBy'),
+        'SELECT StockItemID, StockItemName, SupplierID, ColorID, UnitPackageID, Brand, Size, TaxRate, UnitPrice, RecommendedRetailPrice, Barcode, Tags, CustomFields, SearchDetails, LastEditedBy FROM dbo.stockitems',
+        true),
+
+        -- incremental: Invoices
+        ('WWI', 'dbo', 'invoices', 'bronze', 'wwi_invoices', 'incremental',
+        'LastEditedWhen', 'LastEditedWhen',
+        ARRAY('InvoiceID'),
+        ARRAY('CustomerID', 'BillToCustomerID', 'OrderID', 'DeliveryMethodID', 'ContactPersonID', 'AccountsPersonID', 'SalespersonPersonID', 'PackedByPersonID', 'InvoiceDate', 'CustomerPurchaseOrderNumber', 'IsCreditNote', 'CreditNoteReason', 'Comments', 'DeliveryInstructions', 'InternalComments', 'TotalDryItems', 'TotalChillerItems', 'DeliveryRun', 'RunPosition', 'ReturnedDeliveryData', 'ConfirmedDeliveryTime', 'ConfirmedReceivedBy', 'LastEditedBy', 'LastEditedWhen'),
+        'SELECT InvoiceID, CustomerID, BillToCustomerID, OrderID, DeliveryMethodID, ContactPersonID, AccountsPersonID, SalespersonPersonID, PackedByPersonID, InvoiceDate, CustomerPurchaseOrderNumber, IsCreditNote, CreditNoteReason, Comments, DeliveryInstructions, InternalComments, TotalDryItems, TotalChillerItems, DeliveryRun, RunPosition, ReturnedDeliveryData, ConfirmedDeliveryTime, ConfirmedReceivedBy, LastEditedBy, LastEditedWhen FROM dbo.invoices',
+        true),
+
+        -- incremental: InvoiceLines
+        ('WWI', 'dbo', 'invoicelines', 'bronze', 'wwi_invoicelines', 'incremental',
+        'LastEditedWhen', 'LastEditedWhen',
+        ARRAY('InvoiceLineID'),
+        ARRAY('InvoiceID', 'StockItemID', 'Description', 'PackageTypeID', 'Quantity', 'UnitPrice', 'TaxRate', 'TaxAmount', 'LineProfit', 'ExtendedPrice', 'LastEditedBy', 'LastEditedWhen'),
+        'SELECT InvoiceLineID, InvoiceID, StockItemID, Description, PackageTypeID, Quantity, UnitPrice, TaxRate, TaxAmount, LineProfit, ExtendedPrice, LastEditedBy, LastEditedWhen FROM dbo.invoicelines',
+        true)
+    """)
+    print("Inserted 4 metadata rows (first run)")
+else:
+    print(f"pipeline_metadata already has {existing_count} rows — skipping insert")
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+display(spark.sql("""
+SELECT source_system, source_schema, source_table, target_table,
+       load_type, watermark_column, custom_query
+FROM etl.pipeline_metadata
+ORDER BY target_table
+"""))
 
 # METADATA ********************
 

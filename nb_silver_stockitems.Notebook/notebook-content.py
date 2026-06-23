@@ -37,23 +37,16 @@ from pyspark.sql.window import Window
 from delta.tables import DeltaTable      
 from datetime import datetime            
 
-
-
 BRONZE_PATH    = "Files/bronze/wwi_stockitems/"
 SILVER_TABLE   = "silver.wwi_stockitems"
 BUSINESS_KEY   = "StockItemID"
 WATERMARK_FLOW = "bronze_wwi_stockitems_TO_silver_wwi_stockitems"
-
-
 
 BUSINESS_COLS = [
     "StockItemName", "SupplierID", "ColorID", "UnitPackageID",
     "Brand", "Size", "TaxRate", "UnitPrice", "RecommendedRetailPrice",
     "Barcode", "Tags", "CustomFields", "SearchDetails", "LastEditedBy"
 ]
-
-
-
 
 # ALL_SILVER_COLS
 # Full Silver column list in DDL order (key + business + meta)
@@ -81,12 +74,17 @@ ALL_SILVER_COLS = [BUSINESS_KEY] + BUSINESS_COLS + [
 # - Silver is INSERT-only so MAX(audit_ts) = the last Silver batch
 # - Fallback '1900-01-01' if Silver is empty (first run)
 # - Used as lower-bound filter for Bronze in tmp_bronze
+
+# silver_df: stockitems silver table
 silver_df = spark.read.table(SILVER_TABLE)
 
 max_audit_row = silver_df.agg(
     spark_max("audit_ts").alias("max_silver_audit_ts")
 ).first()
 
+# max_silver_audit = the nearest previous timestamp Silver run
+#                  = last time Silver consumed Bronze
+#                  = MAX(audit_ts) of silver table
 if max_audit_row["max_silver_audit_ts"] is None:
     # Silver empty → fallback (every Bronze row passes filter > '1900-01-01')
     max_silver_audit = "1900-01-01 00:00:00"
@@ -130,34 +128,12 @@ latest_per_key_window = Window.partitionBy(BUSINESS_KEY).orderBy(desc("audit_ts"
 # - Drop helper after use
 tmp_silver = (
     silver_df
+    .filter(col("deleted_audit_ts").isNull())
     .withColumn("version_rank", row_number().over(latest_per_key_window))
     .filter(col("version_rank") == 1)
     .drop("version_rank")
 )
 
-print(f"Latest Silver state (tmp_silver): {tmp_silver.count()} rows")
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# BUILD tmp_silver — latest state Silver (RANK = 1)
-# PARTITION BY StockItemID, ORDER BY audit_ts DESC → giữ row mới nhất
-silver_df = spark.read.table(SILVER_TABLE)
-window_silver = Window.partitionBy(BUSINESS_KEY).orderBy(desc("audit_ts"))
-
-tmp_silver = (
-    silver_df
-    .withColumn("rn", row_number().over(window_silver))
-    .filter(col("rn") == 1)
-    .drop("rn")
-)
-tmp_silver.createOrReplaceTempView("tmp_silver")
 print(f"Latest Silver state (tmp_silver): {tmp_silver.count()} rows")
 
 # METADATA ********************
@@ -179,6 +155,7 @@ bronze_df = spark.read.option("recursiveFileLookup", "true").parquet(BRONZE_PATH
 # find latest Bronze batch
 # - max_bronze_audit = time of the most recent Bronze Copy run
 # - Full load: only need the latest batch (1 file = full source snapshot)
+# max_bronze_audit = MAX(audit_ts) across all Bronze parquet
 max_bronze_audit_row = bronze_df.agg(
     spark_max("audit_ts").alias("max_bronze_audit_ts")
 ).first()

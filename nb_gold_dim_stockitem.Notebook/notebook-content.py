@@ -147,6 +147,7 @@ tmp_silver = (
     silver_recent
     .withColumn("version_rank", row_number().over(latest_window))
     .filter(col("version_rank") == 1)
+    .filter(col("deleted_audit_ts").isNull())
     .drop("version_rank")
 )
 

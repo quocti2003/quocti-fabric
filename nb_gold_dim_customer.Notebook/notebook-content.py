@@ -56,6 +56,67 @@
 
 # CELL ********************
 
+# Silver → Gold dim_customer — General workflow
+# Phase 1: What we SCAN/READ from Gold (existing state)
+    #   Read: gold.dim_customer (full table)
+    #   → Get 3 things:
+        # max_gold_audit (last Gold run timestamp)
+        # max_existing_skey (highest skey used)
+        # tmp_dim (current active versions, excluding -1 default)
+
+
+
+
+
+# Phase 2: What we SCAN/READ from Silver
+# Read: silver.wwi_customers (full table)
+    # Apply filters:
+        # audit_ts > max_gold_audit (only new since last Gold run)
+        # deleted_audit_ts IS NULL (skip soft-deleted)
+        # Window RANK=1 per CustomerID (keep latest version)
+        # → Result: tmp_silver = latest active Silver version per CustomerID, since last Gold run.
+
+
+
+# Phase 3: Compare and identify what to WRITE
+    # Compare tmp_silver (Silver delta) vs tmp_dim (Gold current):
+    # CHANGED: same CustomerID, hash differs → write as new SCD2 version
+    # NEW: CustomerID only in Silver → write as first SCD2 version
+    # → Result: rows_to_insert
+
+# Phase 4: WRITE to Gold
+# Write: APPEND new rows to gold.dim_customer
+# Each new row gets:
+# New customer_skey (max_existing + row_number)
+# Placeholder SCD2 values (recomputed in Phase 5)
+# audit_ts = current_audit_ts (this batch ID)
+
+
+# Phase 5: WRITE to Gold (UPDATE timeline)
+# Read Gold again (includes Phase 4's inserts), recompute SCD2 timeline via LAG/LEAD:
+
+# scd_version, scd_from, scd_to, scd_active for ALL versions per key
+
+# Write: MERGE UPDATE 4 SCD2 columns into gold.dim_customer
+# Phase 6: WRITE default row (if needed)
+
+# Write: APPEND default row (-1) to gold.dim_customer (if not exists)
+# Idempotent — only first run.
+
+# Phase 7: WRITE to etl.watermark + Verify
+
+# Write: APPEND log entry to etl.watermark
+# Verify counts (print only).
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
 from pyspark.sql.functions import (
     col, lit, sha2, concat_ws, coalesce, trim,
     max as spark_max, min as spark_min,
@@ -84,9 +145,9 @@ BUSINESS_COLS = [
 ]
 
 # Default-row sentinels (customer_skey = -1 for unknown)
-DEFAULT_SKEY    = -1 # to index and link dimension records to fact tables
-DEFAULT_VERSION = 1
-DEFAULT_ACTIVE  = 1
+DEFAULT_SKEY    = -1 # Sentinel for unresolved fact FKs
+DEFAULT_VERSION = 1 # initial scd version (recomputed later)
+DEFAULT_ACTIVE  = 1 
 INFERRED_FALSE  = 0
 SOURCE_ID       = "WWI"
 
@@ -104,76 +165,39 @@ print(f"Loading: {SILVER_TABLE} → {GOLD_TABLE}")
 
 # CELL ********************
 
-# This cell code do 3 things
-# 1/ max_gold_audit: last time this flow consumed Silver run succefully
-# 2/ current_audit_ts: So all rows from one uniformed batch share one timestamp
-# 3/ max_existing_skey: highest skey already used (excluding -1 default)
-#   → new skeys start at max_existing_skey + 1
+gold_before_insert = spark.read.table(GOLD_TABLE) # read full Gold table 
 
-# GOLD_TABLE     = "gold.dim_customer" 
-gold_df = spark.read.table(GOLD_TABLE) # reads ALL of gold.dim_customer, -1 default row also
-
-# Marker: MAX(audit_ts) from Gold dim (fallback if first run)
-max_audit_row = gold_df.agg(
-    spark_max("audit_ts").alias("max_gold_audit_ts")
-).first()
-
-# max_gold_audit: the timestamp of the most recent batch this Silver -> gold (dim_customer) notebook successfully wrote
-if max_audit_row["max_gold_audit_ts"] is None:
-    max_gold_audit = "1900-01-01 00:00:00"
-else:
-    max_gold_audit = str(max_audit_row["max_gold_audit_ts"])
-
-print(f"The timestamp of the most recent batch this Silver -> gold (dim_customer): {max_gold_audit}")
-
-
-# Current batch time (frozen for this run)
-current_audit_ts = datetime.now()
-print(f"Current Gold batch audit_ts: {current_audit_ts}")
-
-
-# Max existing skey (excludes default row -1)
-max_skey_row = (
-    gold_df.filter(col("customer_skey") != DEFAULT_SKEY)
-    .agg(spark_max("customer_skey").alias("max_skey"))
-    .first()
+max_gold_audit = (
+    gold_before_insert.agg(spark_max("audit_ts").alias("m")).first()["m"]
 )
-# output of max_skey_row is Row object (not DF)
-# we can access the value 2 ways 
-# max_skey_row["max_skey"]      → 663
-# max_skey_row.max_skey         → 663
 
-#  "What's the highest customer_skey already used in Gold?"
-# max_existing_skey A Python variable just in memory during one notebook run, holds the MAX of customer_skey
-max_existing_skey = max_skey_row["max_skey"] if max_skey_row["max_skey"] is not None else 0
-# new skeys start at max_existing_skey + 1
-print(f"Max existing customer_skey: {max_existing_skey} (new skeys will start at {max_existing_skey + 1})")
+# max_gold_audit: last time Gold consumed Silver
+if max_gold_audit is None:
+    max_gold_audit = "1900-01-01 00:00:00"   # fallback for first run
+else:
+    max_gold_audit = str(max_gold_audit)
 
-# METADATA ********************
+print(f"Max Gold audit_ts (marker): {max_gold_audit}")
 
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
+# max_existing_skey — highest skey used (excluding -1 default)
+max_existing_skey = (
+    gold_before_insert
+    .filter(col("customer_skey") != DEFAULT_SKEY)
+    .agg(spark_max("customer_skey").alias("m")).first()["m"]
+)
+if max_existing_skey is None:
+    max_existing_skey = 0
+print(f"Max existing customer_skey: {max_existing_skey} (new skeys start at {max_existing_skey + 1})")
 
-# CELL ********************
-
-# tmp_dim — current active version per CustomerID
-# - Filter scd_active = 1 (current version only), because scd_active = 0 is historical
-# - Exclude default row (customer_skey = -1)
-# - Used to compare row_hash and detect CHANGED rows
-# - It takes a snapshot of each CustomerID (business_key) in Gold looks like right now (representing the current version only).
-# - gold_df all rows from gold dim table 
-# - SCD2 dims hold every historical version, in other words, 1 row can have many version (like updated/changed data)
-# - Why we need this tmp_dim ?
-# => we just only care about the active version (the latest one).
+# tmp_dim — just take all current ACTIVE version per CustomerID (for change detection)
 tmp_dim = (
-    gold_df
+    gold_before_insert
     .filter(col("scd_active") == 1)
     .filter(col("customer_skey") != DEFAULT_SKEY)
 )
 
-print(f"Current active dim versions (tmp_dim): {tmp_dim.count()} rows")
+# print(f"Current active dim versions (tmp_dim): {tmp_dim.count()} rows")
+# display(tmp_dim)
 
 # METADATA ********************
 
@@ -184,28 +208,27 @@ print(f"Current active dim versions (tmp_dim): {tmp_dim.count()} rows")
 
 # CELL ********************
 
-# tmp_silver — latest active per CustomerID since marker
-# - Filter audit_ts > max_gold_audit (only new/changed Silver rows)
-# - For each CustomerID, keep latest version (RANK = 1 over audit_ts DESC)
-# - Drop deleted (deleted_audit_ts IS NULL)
-# - Compute row_hash (SHA256 with '^' sentinel + '|' delimiter)
+# Read Silver delta + compute row_hash
+# ============================================================
+# Output: tmp_silver = at most 1 row per CustomerID (latest version, with row_hash)
+# Filters:
+#   - audit_ts > max_gold_audit (incremental — only new Silver rows)
+#   - deleted_audit_ts IS NULL (skip soft-deleted Silver keys)
+#   - Window RANK=1 per key (Silver INSERT-only has history)
 
 silver_df = spark.read.table(SILVER_TABLE)
 
-# filter to rows newer than marker AND not deleted
-silver_recent = (
-    silver_df
-    .filter(col("audit_ts") > lit(max_gold_audit))
-    .filter(col("deleted_audit_ts").isNull())
-)
+# filter to rows newer than marker (no deleted filter here — rank first)
+silver_recent = silver_df.filter(col("audit_ts") > lit(max_gold_audit))
 
-# keep latest per CustomerID
+# rank ALL versions (including deleted) — pick absolute latest per CustomerID
 latest_window = Window.partitionBy(BUSINESS_KEY).orderBy(desc("audit_ts"))
 
 tmp_silver = (
     silver_recent
     .withColumn("version_rank", row_number().over(latest_window))
     .filter(col("version_rank") == 1)
+    .filter(col("deleted_audit_ts").isNull())          
     .drop("version_rank")
 )
 
@@ -218,13 +241,6 @@ tmp_silver = tmp_silver.withColumn(
     sha2(concat_ws("|", *[safe_str(c) for c in BUSINESS_COLS]), 256)
 )
 
-# Finally, tmp_silver on row per CustomerID, no two rows share the same business key
-# Conclusion, tmp_silver
-#   1/ at most one row per CustomerID
-#   2/ Each row = the LATEST Silver version of that CustomerID (for this table)
-#   3/ but need newer than audit_ts the timestamp of the most recent batch this Silver -> gold (dim_customer) notebook successfully wrote
-#   4/ that row not soft-deleted too
-#   5/ row-hash too
 print(f"Latest Silver per CustomerID (tmp_silver): {tmp_silver.count()} rows")
 
 # METADATA ********************
@@ -295,36 +311,34 @@ print(f"Total to INSERT: {total_to_insert}")
 
 # CELL ********************
 
-# ALLOCATE SKEYS + INSERT new versions
-# - Skey strategy: max_existing_skey + row_number() OVER (orderBy CustomerID)
-#   Delta has no IDENTITY, so we generate skey at load time.
-# - Set initial SCD2 values: scd_from=current_audit_ts, scd_to=9999-12-31,
-#   scd_active=1, scd_version will be recomputed
+# Stamp batch + Allocate skeys + INSERT
+# - Skey strategy: max_existing_skey + row_number() OVER (orderBy BUSINESS_KEY)
+# - SCD2 placeholder values (recomputed later)
+
+current_audit_ts = datetime.now()
+print(f"Current batch audit_ts: {current_audit_ts}")
+
 
 if total_to_insert > 0:
-    # Allocate skeys sequentially starting from max_existing_skey + 1
+    # Allocate skeys sequentially from max_existing_skey + 1
     skey_window = Window.orderBy(BUSINESS_KEY)
-
-
 
     rows_with_skey = (
         rows_to_insert
         .withColumn("customer_skey",
                     (lit(max_existing_skey) + row_number().over(skey_window)).cast("int"))
-
-        # SCD2 initial values (timeline recomputed in Cell 7)
+        # SCD2 initial values (recomputed in Phase 5)
         .withColumn("scd_from",      lit(current_audit_ts).cast("timestamp"))
         .withColumn("scd_to",        lit(SCD_TO_INFINITY).cast("timestamp"))
-        .withColumn("scd_version",   lit(1).cast("int"))     # placeholder, recomputed later
-        .withColumn("scd_active",    lit(1).cast("int"))     # placeholder, recomputed later
+        .withColumn("scd_version",   lit(DEFAULT_VERSION).cast("int"))   # placeholder
+        .withColumn("scd_active",    lit(DEFAULT_ACTIVE).cast("int"))    # placeholder
         .withColumn("inferred_flag", lit(INFERRED_FALSE).cast("int"))
-
         # Audit / lineage
         .withColumn("audit_ts",      lit(current_audit_ts).cast("timestamp"))
         .withColumn("source_id",     lit(SOURCE_ID))
     )
 
-    # Final column order — must match DDL exactly
+    # Column order matching Gold DDL exactly
     ALL_GOLD_COLS = [
         "customer_skey", BUSINESS_KEY, *BUSINESS_COLS,
         "scd_from", "scd_to", "scd_version", "scd_active", "inferred_flag",
@@ -337,6 +351,7 @@ if total_to_insert > 0:
     print(f"Inserted {total_to_insert} rows (skeys {max_existing_skey + 1} → {max_existing_skey + total_to_insert})")
 else:
     print("No CHANGED or NEW rows — nothing to insert")
+
 
 # METADATA ********************
 
@@ -380,7 +395,7 @@ recomputed = (
     .withColumn(
         "new_scd_from",
         when(
-            lag("audit_ts").over(timeline_window).isNull(),     # version 1
+            lag("audit_ts").over(timeline_window).isNull(),     # version 1 (no LAG)
             lit(datetime(1900, 1, 1)).cast("timestamp")          # → 1900-01-01
         ).otherwise(col("audit_ts"))                             # version N>1: own audit_ts
     )
