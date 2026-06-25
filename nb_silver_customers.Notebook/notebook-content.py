@@ -95,7 +95,9 @@ ALL_SILVER_COLS = [BUSINESS_KEY] + BUSINESS_COLS + [
 # max_audit_row["m"]      # → datetime(2026, 6, 18, 14, 0, 0)
 # max_audit_row.m         # → datetime(2026, 6, 18, 14, 0, 0)
 silver_df = spark.read.table(SILVER_TABLE)
-max_audit_row = silver_df.agg(spark_max("audit_ts").alias("m")).first() # find the MAX(audit_ts) across ALL Silver rows, return as a 1-row object
+
+# find the MAX(audit_ts) across ALL Silver rows, return as a 1-row object
+max_audit_row = silver_df.agg(spark_max("audit_ts").alias("m")).first() 
 
 if max_audit_row["m"] is None:
     max_silver_audit = "1900-01-01 00:00:00" # the audit_ts of the most recent Silver INSERT batch

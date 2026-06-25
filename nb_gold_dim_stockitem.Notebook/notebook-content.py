@@ -47,9 +47,9 @@ BUSINESS_COLS = [
 
 # Sentinels (default row + SCD constants for SCD1)
 DEFAULT_SKEY    = -1
-DEFAULT_VERSION = 1 # SCD1: always 1
+DEFAULT_VERSION = 1 # SCD1: always 1, because update in-place overwrite
 DEFAULT_ACTIVE  = 1 # SCD1: always 1
-INFERRED_FALSE  = 0
+INFERRED_FALSE  = 0 # Real data — normal dim row, INFERRED_TRUE = 1 this one means late-arriving placeholder, temporary row, business cols = NULL/default
 SOURCE_ID       = "WWI"
 SCD_TO_INFINITY = datetime(9999, 12, 31)
 
