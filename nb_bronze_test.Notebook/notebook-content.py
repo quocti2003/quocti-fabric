@@ -22,25 +22,16 @@
 
 # CELL ********************
 
-from pyspark.sql.functions import col, max as spark_max, count as spark_count
-
-BRONZE_CUSTOMERS = "Files/bronze/wwi_customers/"
-BRONZE_INVOICES  = "Files/bronze/wwi_invoices/"
-
-TEST_CUSTOMER_ID = 1        # for full-load tests (S2, S3 — UPDATE)
-NEW_CUSTOMER_ID  = 9999     # for full-load tests (S1, S4 — INSERT/DELETE/UPDATE inserted)
-TEST_INVOICE_ID  = 100      # for incremental tests
-NEW_INVOICE_ID   = 999999
-
-def read_bronze(path):
-    return spark.read.option("recursiveFileLookup", "true").parquet(path)
-
-def latest_batch_info(df):
-    max_audit = df.agg(spark_max("audit_ts").alias("m")).first()["m"]
-    count = df.filter(col("audit_ts") == max_audit).count()
-    return max_audit, count
-
-print("Test notebook ready")
+for tbl, expected in [
+    ("wwi_customers", 663),
+    ("wwi_stockitems", 227),
+    ("wwi_invoices", 70510),
+    ("wwi_invoicelines", 228265),
+]:
+    df = spark.read.option("recursiveFileLookup", "true").parquet(f"Files/bronze/{tbl}/")
+    actual = df.count()
+    status = "✅" if actual >= expected else "❌"
+    print(f"{status} {tbl}: {actual} rows (expected ≥ {expected})")
 
 
 # METADATA ********************

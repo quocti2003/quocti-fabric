@@ -22,101 +22,6 @@
 
 # CELL ********************
 
-# [1] Setup workspace  
-#   Declare what tables I'm reading from and writing to. 
-#   List the columns I care about. Define some constants like "infinity = 9999-12-31."
-# [2] "Where did I leave off last time?"
-#   Look at Gold and find: when did I last load? (max_gold_audit). What's the highest skey I've already used? (max_existing_skey). 
-#   Also: what time is it right now? (current_audit_ts) — I'll stamp every new row with this timestamp.
-# [3] "What does Gold currently know?" 
-#   Build tmp_dim — current active versions in Gold (scd_active=1) 
-#   Read Gold, keep only the CURRENT version of each customer (scd_active = 1). This is my "before" snapshot — what's already in there.
-# [4] "What's new from Silver?" - Build tmp_silver — latest active per CustomerID since marker + row_hash
-#   Read Silver, but ONLY rows newer than my last load. For each CustomerID, keep just the latest version. 
-#   Compute a fingerprint (row_hash) — a SHA-256 of all business columns — so I can detect changes quickly.
-# [5] "What's actually different?" - Detect CHANGED (row_hash differs) and NEW (CustomerID not in dim)
-#   Compare Silver (new) vs Gold (current):
-#       Customer exists in both, fingerprint differs → CHANGED (their data updated).
-#       Customer in Silver but not in Gold → NEW (first-time customer).
-#       Both go into one pile: rows_to_insert.
-# [6] "Assign keys and write them in." Allocate new skeys + INSERT new versions 
-#   Generate new surrogate keys (start at max_existing_skey + 1, count up). 
-#   Stamp every row with the batch timestamp, source_id = "WWI", and placeholder SCD2 values. 
-#   Append into Gold.
-# [7] Recompute SCD2 timeline (LAG/LEAD → UPDATE scd_from/to/version/active)
-# [8] "Make sure my -1 safety net exists." Ensure default row (customer_skey = -1) exists
-# [9] "Log this run and check my work." Save watermark + Verify
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# Silver → Gold dim_customer — General workflow
-# Phase 1: What we SCAN/READ from Gold (existing state)
-    #   Read: gold.dim_customer (full table)
-    #   → Get 3 things:
-        # max_gold_audit (last Gold run timestamp)
-        # max_existing_skey (highest skey used)
-        # tmp_dim (current active versions, excluding -1 default)
-
-
-
-
-
-# Phase 2: What we SCAN/READ from Silver
-# Read: silver.wwi_customers (full table)
-    # Apply filters:
-        # audit_ts > max_gold_audit (only new since last Gold run)
-        # deleted_audit_ts IS NULL (skip soft-deleted)
-        # Window RANK=1 per CustomerID (keep latest version)
-        # → Result: tmp_silver = latest active Silver version per CustomerID, since last Gold run.
-
-
-
-# Phase 3: Compare and identify what to WRITE
-    # Compare tmp_silver (Silver delta) vs tmp_dim (Gold current):
-    # CHANGED: same CustomerID, hash differs → write as new SCD2 version
-    # NEW: CustomerID only in Silver → write as first SCD2 version
-    # → Result: rows_to_insert
-
-# Phase 4: WRITE to Gold
-# Write: APPEND new rows to gold.dim_customer
-# Each new row gets:
-# New customer_skey (max_existing + row_number)
-# Placeholder SCD2 values (recomputed in Phase 5)
-# audit_ts = current_audit_ts (this batch ID)
-
-
-# Phase 5: WRITE to Gold (UPDATE timeline)
-# Read Gold again (includes Phase 4's inserts), recompute SCD2 timeline via LAG/LEAD:
-
-# scd_version, scd_from, scd_to, scd_active for ALL versions per key
-
-# Write: MERGE UPDATE 4 SCD2 columns into gold.dim_customer
-# Phase 6: WRITE default row (if needed)
-
-# Write: APPEND default row (-1) to gold.dim_customer (if not exists)
-# Idempotent — only first run.
-
-# Phase 7: WRITE to etl.watermark + Verify
-
-# Write: APPEND log entry to etl.watermark
-# Verify counts (print only).
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
 from pyspark.sql.functions import (
     col, lit, sha2, concat_ws, coalesce, trim,
     max as spark_max, min as spark_min,
@@ -189,7 +94,7 @@ if max_existing_skey is None:
     max_existing_skey = 0
 print(f"Max existing customer_skey: {max_existing_skey} (new skeys start at {max_existing_skey + 1})")
 
-# tmp_dim — just take all current ACTIVE version per CustomerID (for change detection)
+# tmp_dim — just take all current ACTIVE version per CustomerID in dim (for change detection)
 tmp_dim = (
     gold_before_insert
     .filter(col("scd_active") == 1)
@@ -207,14 +112,6 @@ tmp_dim = (
 # META }
 
 # CELL ********************
-
-# Read Silver delta + compute row_hash
-# ============================================================
-# Output: tmp_silver = at most 1 row per CustomerID (latest version, with row_hash)
-# Filters:
-#   - audit_ts > max_gold_audit (incremental — only new Silver rows)
-#   - deleted_audit_ts IS NULL (skip soft-deleted Silver keys)
-#   - Window RANK=1 per key (Silver INSERT-only has history)
 
 silver_df = spark.read.table(SILVER_TABLE)
 
@@ -236,6 +133,7 @@ tmp_silver = (
 def safe_str(column_name):
     return coalesce(trim(col(column_name).cast("string")), lit("^"))
 
+# tmp_silver = at most 1 row per CustomerID (latest version per business key, with row_hash)
 tmp_silver = tmp_silver.withColumn(
     "row_hash",
     sha2(concat_ws("|", *[safe_str(c) for c in BUSINESS_COLS]), 256)
@@ -395,8 +293,8 @@ recomputed = (
     .withColumn(
         "new_scd_from",
         when(
-            lag("audit_ts").over(timeline_window).isNull(),     # version 1 (no LAG)
-            lit(datetime(1900, 1, 1)).cast("timestamp")          # → 1900-01-01
+            lag("audit_ts").over(timeline_window).isNull(),     # version 1 (no LAG) → 1900-01-01
+            lit(datetime(1900, 1, 1)).cast("timestamp")          
         ).otherwise(col("audit_ts"))                             # version N>1: own audit_ts
     )
     .select(
@@ -454,8 +352,8 @@ if not default_exists:
     from decimal import Decimal
 
     default_schema = StructType([
-        StructField("customer_skey",          IntegerType(), False),
-        StructField("CustomerID",             IntegerType(), False),
+        StructField("customer_skey",          IntegerType(), False), # NOT NULL
+        StructField("CustomerID",             IntegerType(), False), # NOT NULL
         StructField("CustomerName",           StringType()),
         StructField("BillToCustomerID",       IntegerType()),
         StructField("CustomerCategoryID",     IntegerType()),
@@ -486,7 +384,7 @@ if not default_exists:
             DEFAULT_SKEY,                 # customer_skey = -1
             -1,                           # CustomerID = -1 (sentinel)
             "n/a",                        # CustomerName
-            -1, -1, -1, -1, -1,           # 5 IDs
+            -1, -1, -1, -1, -1,           # 5 IDs BillToCustomerID, CustomerCategoryID, PrimaryContactPersonID, DeliveryCityID, PostalCityID
             Decimal("0.00"),              # CreditLimit
             datetime(2999, 12, 31).date(),# AccountOpenedDate
             "", "", "", "", "",           # phone, fax, url, addr1, addr2
@@ -509,6 +407,9 @@ if not default_exists:
 else:
     print("Default row already exists — no action")
 
+# When fact uses default row
+# - CustomerID NULL in source
+# - Business key not in dim (late-arriving)
 
 # METADATA ********************
 

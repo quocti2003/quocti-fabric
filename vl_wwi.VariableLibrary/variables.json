@@ -1,0 +1,17 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/variableLibrary/definition/variables/1.0.0/schema.json",
+  "variables": [
+    {
+      "name": "source_workspace_id",
+      "note": "",
+      "type": "String",
+      "value": "95db64f3-a8cc-49fc-8018-4624f6a69eca"
+    },
+    {
+      "name": "source_sqldb_item_id",
+      "note": "",
+      "type": "String",
+      "value": "f20bed88-5fc8-44cf-9232-1e6bac5c6ef8"
+    }
+  ]
+}
