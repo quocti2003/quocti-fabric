@@ -2,16 +2,58 @@
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/variableLibrary/definition/variables/1.0.0/schema.json",
   "variables": [
     {
-      "name": "source_workspace_id",
+      "name": "workspace_id",
       "note": "",
       "type": "String",
       "value": "95db64f3-a8cc-49fc-8018-4624f6a69eca"
     },
     {
-      "name": "source_sqldb_item_id",
+      "name": "lakehouse_name",
+      "note": "",
+      "type": "String",
+      "value": "lh_wwi"
+    },
+    {
+      "name": "lakehouse_id",
+      "note": "",
+      "type": "String",
+      "value": "3748fa11-a97f-43a4-9d4a-2fb72c9cd4af"
+    },
+    {
+      "name": "source_sqldb_name",
+      "note": "",
+      "type": "String",
+      "value": "WWI-Source"
+    },
+    {
+      "name": "source_sqldb_id",
       "note": "",
       "type": "String",
       "value": "f20bed88-5fc8-44cf-9232-1e6bac5c6ef8"
+    },
+    {
+      "name": "source_sqldb_endpoint",
+      "note": "",
+      "type": "String",
+      "value": "f20bed88-5fc8-44cf-9232-1e6bac5c6ef8-f.database.fabric.microsoft.com"
+    },
+    {
+      "name": "source_system_id",
+      "note": "",
+      "type": "String",
+      "value": "WWI"
+    },
+    {
+      "name": "fabric_source_connection",
+      "note": "",
+      "type": "String",
+      "value": "5528af22-bc9a-4610-889e-aa24098515b2"
+    },
+    {
+      "name": "lakehouse_connection_id",
+      "note": "",
+      "type": "String",
+      "value": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
     }
   ]
 }

@@ -83,46 +83,51 @@ print(f"Created etl.pipeline_metadata (rows: {spark.read.table('etl.pipeline_met
 
 # CELL ********************
 
-existing_count = spark.read.table("etl.pipeline_metadata").count()
+spark.sql("""
+INSERT INTO etl.pipeline_metadata VALUES
 
-if existing_count == 0:
-    spark.sql("""
-        INSERT INTO etl.pipeline_metadata VALUES
+-- Customers (Sales.Customers, full load)
+('WWI', 'Sales', 'Customers', 'bronze', 'wwi_customers', 'full', NULL, NULL,
+ ARRAY('CustomerID'),
+ ARRAY('CustomerName', 'BillToCustomerID', 'CustomerCategoryID', 'PrimaryContactPersonID',
+       'DeliveryCityID', 'PostalCityID', 'CreditLimit', 'AccountOpenedDate',
+       'PhoneNumber', 'FaxNumber', 'WebsiteURL', 'DeliveryAddressLine1',
+       'DeliveryAddressLine2', 'IsOnCreditHold', 'LastEditedBy'),
+ 'SELECT CustomerID, CustomerName, BillToCustomerID, CustomerCategoryID, PrimaryContactPersonID, DeliveryCityID, PostalCityID, CreditLimit, AccountOpenedDate, PhoneNumber, FaxNumber, WebsiteURL, DeliveryAddressLine1, DeliveryAddressLine2, IsOnCreditHold, LastEditedBy FROM Sales.Customers',
+ true),
 
-        -- full load: Customers (skip GeographyDeliveryLocation)
-        ('WWI', 'dbo', 'customers', 'bronze', 'wwi_customers', 'full', NULL, NULL,
-        ARRAY('CustomerID'),
-        ARRAY('CustomerName', 'BillToCustomerID', 'CustomerCategoryID', 'PrimaryContactPersonID', 'DeliveryCityID', 'PostalCityID', 'CreditLimit', 'AccountOpenedDate', 'PhoneNumber', 'FaxNumber', 'WebsiteURL', 'DeliveryAddressLine1', 'DeliveryAddressLine2', 'IsOnCreditHold', 'LastEditedBy'),
-        'SELECT CustomerID, CustomerName, BillToCustomerID, CustomerCategoryID, PrimaryContactPersonID, DeliveryCityID, PostalCityID, CreditLimit, AccountOpenedDate, PhoneNumber, FaxNumber, WebsiteURL, DeliveryAddressLine1, DeliveryAddressLine2, IsOnCreditHold, LastEditedBy FROM dbo.customers',
-        true),
+-- StockItems (Warehouse.StockItems, full load)
+('WWI', 'Warehouse', 'StockItems', 'bronze', 'wwi_stockitems', 'full', NULL, NULL,
+ ARRAY('StockItemID'),
+ ARRAY('StockItemName', 'SupplierID', 'ColorID', 'UnitPackageID', 'Brand', 'Size',
+       'TaxRate', 'UnitPrice', 'RecommendedRetailPrice', 'Barcode', 'Tags',
+       'CustomFields', 'SearchDetails', 'LastEditedBy'),
+ 'SELECT StockItemID, StockItemName, SupplierID, ColorID, UnitPackageID, Brand, Size, TaxRate, UnitPrice, RecommendedRetailPrice, Barcode, Tags, CustomFields, SearchDetails, LastEditedBy FROM Warehouse.StockItems',
+ true),
 
-        -- full load: StockItems (skip Photo varbinary)
-        ('WWI', 'dbo', 'stockitems', 'bronze', 'wwi_stockitems', 'full', NULL, NULL,
-        ARRAY('StockItemID'),
-        ARRAY('StockItemName', 'SupplierID', 'ColorID', 'UnitPackageID', 'Brand', 'Size', 'TaxRate', 'UnitPrice', 'RecommendedRetailPrice', 'Barcode', 'Tags', 'CustomFields', 'SearchDetails', 'LastEditedBy'),
-        'SELECT StockItemID, StockItemName, SupplierID, ColorID, UnitPackageID, Brand, Size, TaxRate, UnitPrice, RecommendedRetailPrice, Barcode, Tags, CustomFields, SearchDetails, LastEditedBy FROM dbo.stockitems',
-        true),
+-- Invoices (Sales.Invoices, incremental)
+('WWI', 'Sales', 'Invoices', 'bronze', 'wwi_invoices', 'incremental',
+ 'LastEditedWhen', 'LastEditedWhen',
+ ARRAY('InvoiceID'),
+ ARRAY('CustomerID', 'BillToCustomerID', 'OrderID', 'DeliveryMethodID',
+       'ContactPersonID', 'AccountsPersonID', 'SalespersonPersonID', 'PackedByPersonID',
+       'InvoiceDate', 'CustomerPurchaseOrderNumber', 'IsCreditNote', 'CreditNoteReason',
+       'Comments', 'DeliveryInstructions', 'InternalComments', 'TotalDryItems',
+       'TotalChillerItems', 'DeliveryRun', 'RunPosition', 'ReturnedDeliveryData',
+       'ConfirmedDeliveryTime', 'ConfirmedReceivedBy', 'LastEditedBy', 'LastEditedWhen'),
+ 'SELECT InvoiceID, CustomerID, BillToCustomerID, OrderID, DeliveryMethodID, ContactPersonID, AccountsPersonID, SalespersonPersonID, PackedByPersonID, InvoiceDate, CustomerPurchaseOrderNumber, IsCreditNote, CreditNoteReason, Comments, DeliveryInstructions, InternalComments, TotalDryItems, TotalChillerItems, DeliveryRun, RunPosition, ReturnedDeliveryData, ConfirmedDeliveryTime, ConfirmedReceivedBy, LastEditedBy, LastEditedWhen FROM Sales.Invoices',
+ true),
 
-        -- incremental: Invoices
-        ('WWI', 'dbo', 'invoices', 'bronze', 'wwi_invoices', 'incremental',
-        'LastEditedWhen', 'LastEditedWhen',
-        ARRAY('InvoiceID'),
-        ARRAY('CustomerID', 'BillToCustomerID', 'OrderID', 'DeliveryMethodID', 'ContactPersonID', 'AccountsPersonID', 'SalespersonPersonID', 'PackedByPersonID', 'InvoiceDate', 'CustomerPurchaseOrderNumber', 'IsCreditNote', 'CreditNoteReason', 'Comments', 'DeliveryInstructions', 'InternalComments', 'TotalDryItems', 'TotalChillerItems', 'DeliveryRun', 'RunPosition', 'ReturnedDeliveryData', 'ConfirmedDeliveryTime', 'ConfirmedReceivedBy', 'LastEditedBy', 'LastEditedWhen'),
-        'SELECT InvoiceID, CustomerID, BillToCustomerID, OrderID, DeliveryMethodID, ContactPersonID, AccountsPersonID, SalespersonPersonID, PackedByPersonID, InvoiceDate, CustomerPurchaseOrderNumber, IsCreditNote, CreditNoteReason, Comments, DeliveryInstructions, InternalComments, TotalDryItems, TotalChillerItems, DeliveryRun, RunPosition, ReturnedDeliveryData, ConfirmedDeliveryTime, ConfirmedReceivedBy, LastEditedBy, LastEditedWhen FROM dbo.invoices',
-        true),
-
-        -- incremental: InvoiceLines
-        ('WWI', 'dbo', 'invoicelines', 'bronze', 'wwi_invoicelines', 'incremental',
-        'LastEditedWhen', 'LastEditedWhen',
-        ARRAY('InvoiceLineID'),
-        ARRAY('InvoiceID', 'StockItemID', 'Description', 'PackageTypeID', 'Quantity', 'UnitPrice', 'TaxRate', 'TaxAmount', 'LineProfit', 'ExtendedPrice', 'LastEditedBy', 'LastEditedWhen'),
-        'SELECT InvoiceLineID, InvoiceID, StockItemID, Description, PackageTypeID, Quantity, UnitPrice, TaxRate, TaxAmount, LineProfit, ExtendedPrice, LastEditedBy, LastEditedWhen FROM dbo.invoicelines',
-        true)
-    """)
-    print("Inserted 4 metadata rows (first run)")
-else:
-    print(f"pipeline_metadata already has {existing_count} rows — skipping insert")
-
+-- InvoiceLines (Sales.InvoiceLines, incremental)
+('WWI', 'Sales', 'InvoiceLines', 'bronze', 'wwi_invoicelines', 'incremental',
+ 'LastEditedWhen', 'LastEditedWhen',
+ ARRAY('InvoiceLineID'),
+ ARRAY('InvoiceID', 'StockItemID', 'Description', 'PackageTypeID', 'Quantity',
+       'UnitPrice', 'TaxRate', 'TaxAmount', 'LineProfit', 'ExtendedPrice',
+       'LastEditedBy', 'LastEditedWhen'),
+ 'SELECT InvoiceLineID, InvoiceID, StockItemID, Description, PackageTypeID, Quantity, UnitPrice, TaxRate, TaxAmount, LineProfit, ExtendedPrice, LastEditedBy, LastEditedWhen FROM Sales.InvoiceLines',
+ true)
+""")
 
 # METADATA ********************
 

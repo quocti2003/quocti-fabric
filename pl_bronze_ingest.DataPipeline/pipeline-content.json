@@ -23,29 +23,25 @@
                       "source": {
                         "type": "LakehouseTableSource",
                         "sqlReaderQuery": {
-                          "value": "SELECT COALESCE(\n    (SELECT TOP 1 watermark_value\n     FROM etl.watermark\n     WHERE object_name = '@{concat(item().source_system, '_', item().source_schema, '_', item().source_table, '_TO_bronze_', item().target_table)}'\n     ORDER BY timestamp DESC),\n    '1900-01-01 00:00:00'\n) AS last_wm",
+                          "value": "SELECT COALESCE(\n    (SELECT TOP 1 watermark_value\n     FROM etl.watermark\n     WHERE object_name = '@{concat(item().source_system, '_', item().source_schema, '_', item().source_table, '_TO_', item().target_schema, '_', item().target_table)}'\n     ORDER BY timestamp DESC),\n    '1900-01-01 00:00:00'\n) AS last_wm",
                           "type": "Expression"
                         },
                         "partitionOption": "None"
                       },
                       "datasetSettings": {
                         "type": "LakehouseTable",
-                        "typeProperties": {
-                          "schema": "etl",
-                          "table": "watermark"
-                        },
                         "schema": [],
                         "connectionSettings": {
-                          "name": "lh_wwi",
+                          "name": "8c1d4f03_cc0d_47e3_b75d_023cf21b67a1",
                           "properties": {
                             "type": "Lakehouse",
                             "typeProperties": {
-                              "artifactId": "2c9cd4af-2fb7-9d4a-43a4-a97f3748fa11",
-                              "workspaceId": "00000000-0000-0000-0000-000000000000",
+                              "artifactId": "@pipeline().libraryVariables.vl_wwi_lakehouse_id",
+                              "workspaceId": "@pipeline().libraryVariables.vl_wwi_workspace_id",
                               "rootFolder": "Tables"
                             },
                             "externalReferences": {
-                              "connection": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
+                              "connection": "@pipeline().libraryVariables.vl_wwi_lakehouse_connection_id"
                             },
                             "annotations": []
                           }
@@ -68,27 +64,24 @@
                     "type": "Lookup",
                     "typeProperties": {
                       "source": {
-                        "type": "LakehouseTableSource",
-                        "sqlReaderQuery": {
-                          "value": "SELECT MAX(@{item().watermark_column}) as src_wm\nFROM @{item().source_schema}.@{item().source_table}",
-                          "type": "Expression"
-                        },
-                        "partitionOption": "None"
+                        "type": "FabricSqlDatabaseSource",
+                        "sqlReaderQuery": "SELECT MAX(@{item().watermark_column}) as src_wm\nFROM @{item().source_schema}.@{item().source_table}",
+                        "partitionOption": "None",
+                        "queryTimeout": "02:00:00"
                       },
                       "datasetSettings": {
-                        "type": "LakehouseTable",
+                        "type": "FabricSqlDatabaseTable",
                         "schema": [],
                         "connectionSettings": {
-                          "name": "lh_wwi",
+                          "name": "8456dbe5_72b3_4997_a11e_e4a46d0adf0a",
                           "properties": {
-                            "type": "Lakehouse",
+                            "type": "FabricSqlDatabase",
                             "typeProperties": {
-                              "artifactId": "2c9cd4af-2fb7-9d4a-43a4-a97f3748fa11",
-                              "workspaceId": "00000000-0000-0000-0000-000000000000",
-                              "rootFolder": "Tables"
+                              "artifactId": "@pipeline().libraryVariables.vl_wwi_source_sqldb_id",
+                              "workspaceId": "@pipeline().libraryVariables.vl_wwi_workspace_id"
                             },
                             "externalReferences": {
-                              "connection": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
+                              "connection": "@pipeline().libraryVariables.vl_wwi_fabric_source_connection"
                             },
                             "annotations": []
                           }
@@ -110,26 +103,39 @@
                     "type": "Copy",
                     "typeProperties": {
                       "source": {
-                        "type": "LakehouseTableSource",
-                        "sqlReaderQuery": {
-                          "value": "@{item().custom_query}\nWHERE @{item().watermark_column} > '@{activity('Lookup_GetLastWatermark').output.firstRow.last_wm}'\n  AND @{item().watermark_column} <= '@{activity('Lookup_GetSourceWatermark').output.firstRow.src_wm}'\n",
-                          "type": "Expression"
-                        },
+                        "type": "FabricSqlDatabaseSource",
+                        "sqlReaderQuery": "@{item().custom_query}\nWHERE @{item().watermark_column} > '@{activity('Lookup_GetLastWatermark').output.firstRow.last_wm}'\n  AND @{item().watermark_column} <= '@{activity('Lookup_GetSourceWatermark').output.firstRow.src_wm}'\n",
                         "partitionOption": "None",
+                        "queryTimeout": "02:00:00",
+                        "additionalColumns": [
+                          {
+                            "name": "audit_ts",
+                            "value": {
+                              "value": "@utcNow()",
+                              "type": "Expression"
+                            }
+                          },
+                          {
+                            "name": "source_id",
+                            "value": {
+                              "value": "@{item().source_system}",
+                              "type": "Expression"
+                            }
+                          }
+                        ],
                         "datasetSettings": {
-                          "type": "LakehouseTable",
+                          "type": "FabricSqlDatabaseTable",
                           "schema": [],
                           "connectionSettings": {
-                            "name": "lh_wwi",
+                            "name": "43c71fd8_abed_4f87_bd99_56ea58ccbcf9",
                             "properties": {
-                              "type": "Lakehouse",
+                              "type": "FabricSqlDatabase",
                               "typeProperties": {
-                                "artifactId": "2c9cd4af-2fb7-9d4a-43a4-a97f3748fa11",
-                                "workspaceId": "00000000-0000-0000-0000-000000000000",
-                                "rootFolder": "Tables"
+                                "artifactId": "@pipeline().libraryVariables.vl_wwi_source_sqldb_id",
+                                "workspaceId": "@pipeline().libraryVariables.vl_wwi_workspace_id"
                               },
                               "externalReferences": {
-                                "connection": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
+                                "connection": "@pipeline().libraryVariables.vl_wwi_fabric_source_connection"
                               },
                               "annotations": []
                             }
@@ -144,7 +150,7 @@
                           "enableVertiParquet": true
                         },
                         "storeSettings": {
-                          "type": "AzureBlobStorageWriteSettings"
+                          "type": "LakehouseWriteSettings"
                         },
                         "datasetSettings": {
                           "type": "Parquet",
@@ -160,16 +166,16 @@
                           },
                           "schema": [],
                           "connectionSettings": {
-                            "name": "lh_wwi",
+                            "name": "55736802_8a41_41fe_af8c_1f3e35d7ec91",
                             "properties": {
                               "type": "Lakehouse",
                               "typeProperties": {
-                                "artifactId": "2c9cd4af-2fb7-9d4a-43a4-a97f3748fa11",
-                                "workspaceId": "00000000-0000-0000-0000-000000000000",
+                                "artifactId": "@pipeline().libraryVariables.vl_wwi_lakehouse_id",
+                                "workspaceId": "@pipeline().libraryVariables.vl_wwi_workspace_id",
                                 "rootFolder": "Files"
                               },
                               "externalReferences": {
-                                "connection": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
+                                "connection": "@pipeline().libraryVariables.vl_wwi_lakehouse_connection_id"
                               },
                               "annotations": []
                             }
@@ -217,15 +223,12 @@
                       "workspaceId": "00000000-0000-0000-0000-000000000000",
                       "parameters": {
                         "object_name": {
-                          "value": {
-                            "value": "@{concat(item().source_system, '_', item().source_schema, '_', item().source_table, '_TO_bronze_', item().target_table)}",
-                            "type": "Expression"
-                          },
+                          "value": "@{concat(item().source_system, '_', item().source_schema, '_', item().source_table, '_TO_', item().target_schema, '_', item().target_table)}\n",
                           "type": "string"
                         },
                         "watermark_value": {
                           "value": {
-                            "value": "@activity('Lookup_GetSourceWatermark').output.firstRow.src_wm",
+                            "value": "@activity('Lookup_GetSourceWatermark').output.firstRow.src_wm\n",
                             "type": "Expression"
                           },
                           "type": "string"
@@ -255,23 +258,39 @@
                     "type": "Copy",
                     "typeProperties": {
                       "source": {
-                        "type": "LakehouseTableSource",
+                        "type": "FabricSqlDatabaseSource",
                         "sqlReaderQuery": "@{item().custom_query}",
                         "partitionOption": "None",
+                        "queryTimeout": "02:00:00",
+                        "additionalColumns": [
+                          {
+                            "name": "audit_ts",
+                            "value": {
+                              "value": "@utcNow()",
+                              "type": "Expression"
+                            }
+                          },
+                          {
+                            "name": "source_id",
+                            "value": {
+                              "value": "@{item().source_system}",
+                              "type": "Expression"
+                            }
+                          }
+                        ],
                         "datasetSettings": {
-                          "type": "LakehouseTable",
+                          "type": "FabricSqlDatabaseTable",
                           "schema": [],
                           "connectionSettings": {
-                            "name": "lh_wwi",
+                            "name": "a7b3fca5_89af_4b96_9ced_430cba47c4d6",
                             "properties": {
-                              "type": "Lakehouse",
+                              "type": "FabricSqlDatabase",
                               "typeProperties": {
-                                "artifactId": "2c9cd4af-2fb7-9d4a-43a4-a97f3748fa11",
-                                "workspaceId": "00000000-0000-0000-0000-000000000000",
-                                "rootFolder": "Tables"
+                                "artifactId": "@pipeline().libraryVariables.vl_wwi_source_sqldb_id",
+                                "workspaceId": "@pipeline().libraryVariables.vl_wwi_workspace_id"
                               },
                               "externalReferences": {
-                                "connection": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
+                                "connection": "@pipeline().libraryVariables.vl_wwi_fabric_source_connection"
                               },
                               "annotations": []
                             }
@@ -286,7 +305,7 @@
                           "enableVertiParquet": true
                         },
                         "storeSettings": {
-                          "type": "AzureBlobStorageWriteSettings"
+                          "type": "LakehouseWriteSettings"
                         },
                         "datasetSettings": {
                           "type": "Parquet",
@@ -302,16 +321,16 @@
                           },
                           "schema": [],
                           "connectionSettings": {
-                            "name": "lh_wwi",
+                            "name": "564c3a3b_9b69_4bb1_8ed2_58ab7f927004",
                             "properties": {
                               "type": "Lakehouse",
                               "typeProperties": {
-                                "artifactId": "2c9cd4af-2fb7-9d4a-43a4-a97f3748fa11",
-                                "workspaceId": "00000000-0000-0000-0000-000000000000",
+                                "artifactId": "@pipeline().libraryVariables.vl_wwi_lakehouse_id",
+                                "workspaceId": "@pipeline().libraryVariables.vl_wwi_workspace_id",
                                 "rootFolder": "Files"
                               },
                               "externalReferences": {
-                                "connection": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
+                                "connection": "@pipeline().libraryVariables.vl_wwi_lakehouse_connection_id"
                               },
                               "annotations": []
                             }
@@ -404,6 +423,38 @@
     "parameters": {
       "target_filter": {
         "type": "string"
+      }
+    },
+    "libraryVariables": {
+      "vl_wwi_workspace_id": {
+        "type": "String",
+        "variableName": "workspace_id",
+        "libraryName": "vl_wwi"
+      },
+      "vl_wwi_lakehouse_connection_id": {
+        "type": "String",
+        "variableName": "lakehouse_connection_id",
+        "libraryName": "vl_wwi"
+      },
+      "vl_wwi_lakehouse_id": {
+        "type": "String",
+        "variableName": "lakehouse_id",
+        "libraryName": "vl_wwi"
+      },
+      "vl_wwi_source_sqldb_id": {
+        "type": "String",
+        "variableName": "source_sqldb_id",
+        "libraryName": "vl_wwi"
+      },
+      "vl_wwi_source_system_id": {
+        "type": "String",
+        "variableName": "source_system_id",
+        "libraryName": "vl_wwi"
+      },
+      "vl_wwi_fabric_source_connection": {
+        "type": "String",
+        "variableName": "fabric_source_connection",
+        "libraryName": "vl_wwi"
       }
     }
   }

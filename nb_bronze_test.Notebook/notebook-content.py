@@ -22,6 +22,84 @@
 
 # CELL ********************
 
+import shutil
+import os
+from pyspark.sql.utils import AnalysisException
+
+# ============================================================
+# 1. Drop Delta tables (Silver + Gold + etl.watermark)
+# ============================================================
+tables_to_drop = [
+    # Gold
+    "gold.fact_invoiceline",
+    "gold.dim_customer",
+    "gold.dim_stockitem",
+    "gold.dim_date",
+    
+    # Silver
+    "silver.wwi_customers",
+    "silver.wwi_stockitems",
+    "silver.wwi_invoices",
+    "silver.wwi_invoicelines",
+    
+    # ETL control (will be recreated by nb_setup_control_table)
+    "etl.watermark",
+    "etl.pipeline_metadata"
+]
+
+for tbl in tables_to_drop:
+    try:
+        spark.sql(f"DROP TABLE IF EXISTS {tbl}")
+        print(f"✅ Dropped {tbl}")
+    except AnalysisException as e:
+        print(f"⚠️ {tbl}: {e}")
+
+# ============================================================
+# 2. Clear Bronze parquet files
+# ============================================================
+bronze_root = "/lakehouse/default/Files/bronze"
+if os.path.exists(bronze_root):
+    for folder in os.listdir(bronze_root):
+        full_path = os.path.join(bronze_root, folder)
+        if os.path.isdir(full_path):
+            shutil.rmtree(full_path)
+            print(f"✅ Cleared {full_path}")
+else:
+    print("Bronze folder doesn't exist (fresh state)")
+
+# ============================================================
+# 3. Verify all cleared
+# ============================================================
+print("\n=== Verify clean state ===")
+for schema in ["etl", "silver", "gold"]:
+    try:
+        tables = spark.sql(f"SHOW TABLES IN {schema}").collect()
+        if not tables:
+            print(f"  {schema}: empty ✅")
+        else:
+            for t in tables:
+                print(f"  {schema}.{t['tableName']} STILL EXISTS ❌")
+    except AnalysisException:
+        print(f"  {schema}: schema dropped or not exist")
+
+if os.path.exists(bronze_root):
+    contents = os.listdir(bronze_root)
+    print(f"  Bronze files: {len(contents)} items {'(should be 0)' if contents else '✅'}")
+else:
+    print("  Bronze: folder removed ✅")
+
+print("\n=== Clean complete — Ready to re-initialize ===")
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
 for tbl, expected in [
     ("wwi_customers", 663),
     ("wwi_stockitems", 227),

@@ -68,11 +68,25 @@ print("Tables found:", len(results),
 
 # CELL ********************
 
-# Verify variable library
-import notebookutils
 vl = notebookutils.variableLibrary.getLibrary("vl_wwi")
-print("workspace_id :", vl.source_workspace_id)
-print("sqldb_item_id:", vl.source_sqldb_item_id)
+
+# Access variables as properties (cleanest)
+ws_id              = vl.workspace_id
+lakehouse_name     = vl.lakehouse_name
+lakehouse_id       = vl.lakehouse_id
+source_db_name     = vl.source_sqldb_name
+source_db_id       = vl.source_sqldb_id
+source_db_endpoint = vl.source_sqldb_endpoint
+source_system      = vl.source_system_id
+
+print(f"workspace_id:          {ws_id}")
+print(f"lakehouse_name:        {lakehouse_name}")
+print(f"lakehouse_id:          {lakehouse_id}")
+print(f"source_sqldb_name:     {source_db_name}")
+print(f"source_sqldb_id:       {source_db_id}")
+print(f"source_sqldb_endpoint: {source_db_endpoint}")
+print(f"source_system_id:      {source_system}")
+
 
 # METADATA ********************
 
