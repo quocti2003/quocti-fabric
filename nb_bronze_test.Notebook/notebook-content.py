@@ -258,3 +258,138 @@ display(
 # META   "language": "python",
 # META   "language_group": "synapse_pyspark"
 # META }
+
+# CELL ********************
+
+print("=" * 70)
+print(" PHASE 1 — TEST CANDIDATES")
+print("=" * 70)
+
+# Customer candidate for DELETE (0 invoices = safe to delete)
+print("\n=== Customer candidates for DELETE (0 invoices) ===")
+display(spark.sql("""
+    SELECT c.CustomerID, c.CustomerName, COUNT(i.InvoiceID) AS n_invoices
+    FROM silver.wwi_customers c
+    LEFT JOIN silver.wwi_invoices i 
+        ON c.CustomerID = i.CustomerID AND i.deleted_audit_ts IS NULL
+    WHERE c.deleted_audit_ts IS NULL
+    GROUP BY c.CustomerID, c.CustomerName
+    HAVING COUNT(i.InvoiceID) = 0
+    ORDER BY c.CustomerID
+    LIMIT 3
+"""))
+
+# Customer candidates for UPDATE
+print("\n=== Customer candidates for UPDATE ===")
+display(spark.sql("""
+    SELECT CustomerID, CustomerName, CreditLimit, PhoneNumber
+    FROM silver.wwi_customers
+    WHERE deleted_audit_ts IS NULL
+    ORDER BY CustomerID
+    LIMIT 3
+"""))
+
+# StockItem candidate for DELETE (0 lines)
+print("\n=== StockItem candidates for DELETE (0 lines) ===")
+display(spark.sql("""
+    SELECT s.StockItemID, s.StockItemName, COUNT(l.InvoiceLineID) AS n_lines
+    FROM silver.wwi_stockitems s
+    LEFT JOIN silver.wwi_invoicelines l 
+        ON s.StockItemID = l.StockItemID AND l.deleted_audit_ts IS NULL
+    WHERE s.deleted_audit_ts IS NULL
+    GROUP BY s.StockItemID, s.StockItemName
+    HAVING COUNT(l.InvoiceLineID) = 0
+    ORDER BY s.StockItemID
+    LIMIT 3
+"""))
+
+# StockItem candidates for UPDATE
+print("\n=== StockItem candidates for UPDATE ===")
+display(spark.sql("""
+    SELECT StockItemID, StockItemName, UnitPrice, TaxRate
+    FROM silver.wwi_stockitems
+    WHERE deleted_audit_ts IS NULL
+    ORDER BY StockItemID
+    LIMIT 3
+"""))
+
+# Invoice candidate for UPDATE — pick có ít lines để dễ verify
+print("\n=== Invoice candidates for UPDATE (with line count) ===")
+display(spark.sql("""
+    SELECT i.InvoiceID, i.CustomerID, i.InvoiceDate, COUNT(l.InvoiceLineID) AS n_lines
+    FROM silver.wwi_invoices i
+    LEFT JOIN silver.wwi_invoicelines l 
+        ON i.InvoiceID = l.InvoiceID AND l.deleted_audit_ts IS NULL
+    WHERE i.deleted_audit_ts IS NULL
+    GROUP BY i.InvoiceID, i.CustomerID, i.InvoiceDate
+    ORDER BY n_lines ASC, i.InvoiceID
+    LIMIT 3
+"""))
+
+# InvoiceLine candidates for UPDATE — pick lines của Invoice sẽ update để dễ verify fact propagation
+print("\n=== InvoiceLine candidates for UPDATE ===")
+display(spark.sql("""
+    SELECT InvoiceLineID, InvoiceID, StockItemID, Quantity, UnitPrice
+    FROM silver.wwi_invoicelines
+    WHERE deleted_audit_ts IS NULL
+    ORDER BY InvoiceLineID
+    LIMIT 3
+"""))
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+print("=" * 70)
+print(" PHASE 1 — BASELINE STATE")
+print("=" * 70)
+
+# Bronze
+print("\n=== BRONZE ===")
+for tbl in ["wwi_customers", "wwi_stockitems", "wwi_invoices", "wwi_invoicelines"]:
+    df = spark.read.option("recursiveFileLookup","true").parquet(f"Files/bronze/{tbl}/")
+    n_batches = df.select("audit_ts").distinct().count()
+    print(f"  {tbl}: {df.count():,} rows / {n_batches} batches")
+
+# Silver
+print("\n=== SILVER (active / total) ===")
+for tbl, key in [
+    ("silver.wwi_customers", "CustomerID"),
+    ("silver.wwi_stockitems", "StockItemID"),
+    ("silver.wwi_invoices", "InvoiceID"),
+    ("silver.wwi_invoicelines", "InvoiceLineID"),
+]:
+    total = spark.sql(f"SELECT COUNT(*) FROM {tbl}").first()[0]
+    active = spark.sql(f"SELECT COUNT(DISTINCT {key}) FROM {tbl} WHERE deleted_audit_ts IS NULL").first()[0]
+    print(f"  {tbl}: {active:,} active / {total:,} total")
+
+# Gold
+print("\n=== GOLD ===")
+for tbl in ["gold.dim_customer", "gold.dim_stockitem", "gold.dim_date", "gold.fact_invoiceline"]:
+    cnt = spark.sql(f"SELECT COUNT(*) FROM {tbl}").first()[0]
+    print(f"  {tbl}: {cnt:,}")
+
+# SCD2 detail
+print("\n=== dim_customer SCD2 breakdown ===")
+display(spark.sql("""
+    SELECT 
+        COUNT(*) AS total_rows,
+        SUM(CASE WHEN scd_active = 1 THEN 1 ELSE 0 END) AS active_versions,
+        SUM(CASE WHEN scd_active = 0 THEN 1 ELSE 0 END) AS expired_versions,
+        MAX(scd_version) AS max_scd_version
+    FROM gold.dim_customer
+"""))
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }

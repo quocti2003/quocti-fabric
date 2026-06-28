@@ -53,7 +53,7 @@ INFERRED_FALSE  = 0 # Real data — normal dim row, INFERRED_TRUE = 1 this one m
 SOURCE_ID       = "WWI"
 SCD_TO_INFINITY = datetime(9999, 12, 31)
 
-print(f"Loading: {SILVER_TABLE} → {GOLD_TABLE}")
+# print(f"Loading: {SILVER_TABLE} → {GOLD_TABLE}")
 
 # METADATA ********************
 

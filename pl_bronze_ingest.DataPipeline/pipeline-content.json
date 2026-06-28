@@ -65,7 +65,10 @@
                     "typeProperties": {
                       "source": {
                         "type": "FabricSqlDatabaseSource",
-                        "sqlReaderQuery": "SELECT MAX(@{item().watermark_column}) as src_wm\nFROM @{item().source_schema}.@{item().source_table}",
+                        "sqlReaderQuery": {
+                          "value": "SELECT MAX(@{item().watermark_column}) as src_wm\nFROM @{item().source_schema}.@{item().source_table}",
+                          "type": "Expression"
+                        },
                         "partitionOption": "None",
                         "queryTimeout": "02:00:00"
                       },
@@ -104,7 +107,10 @@
                     "typeProperties": {
                       "source": {
                         "type": "FabricSqlDatabaseSource",
-                        "sqlReaderQuery": "@{item().custom_query}\nWHERE @{item().watermark_column} > '@{activity('Lookup_GetLastWatermark').output.firstRow.last_wm}'\n  AND @{item().watermark_column} <= '@{activity('Lookup_GetSourceWatermark').output.firstRow.src_wm}'\n",
+                        "sqlReaderQuery": {
+                          "value": "@{item().custom_query}\nWHERE @{item().watermark_column} > '@{activity('Lookup_GetLastWatermark').output.firstRow.last_wm}'\n  AND @{item().watermark_column} <= '@{activity('Lookup_GetSourceWatermark').output.firstRow.src_wm}'\n",
+                          "type": "Expression"
+                        },
                         "partitionOption": "None",
                         "queryTimeout": "02:00:00",
                         "additionalColumns": [
@@ -223,7 +229,10 @@
                       "workspaceId": "00000000-0000-0000-0000-000000000000",
                       "parameters": {
                         "object_name": {
-                          "value": "@{concat(item().source_system, '_', item().source_schema, '_', item().source_table, '_TO_', item().target_schema, '_', item().target_table)}\n",
+                          "value": {
+                            "value": "@{concat(item().source_system, '_', item().source_schema, '_', item().source_table, '_TO_', item().target_schema, '_', item().target_table)}\n",
+                            "type": "Expression"
+                          },
                           "type": "string"
                         },
                         "watermark_value": {
@@ -259,7 +268,10 @@
                     "typeProperties": {
                       "source": {
                         "type": "FabricSqlDatabaseSource",
-                        "sqlReaderQuery": "@{item().custom_query}",
+                        "sqlReaderQuery": {
+                          "value": "@{item().custom_query}",
+                          "type": "Expression"
+                        },
                         "partitionOption": "None",
                         "queryTimeout": "02:00:00",
                         "additionalColumns": [
@@ -381,26 +393,23 @@
         "typeProperties": {
           "source": {
             "type": "LakehouseTableSource",
-            "sqlReaderQuery": {
-              "value": "SELECT * FROM etl.pipeline_metadata\nWHERE is_active = 1\n  AND (\n       '@{pipeline().parameters.target_filter}' = ''\n       OR ',@{pipeline().parameters.target_filter},' LIKE CONCAT('%,', target_table, ',%')\n  )\n",
-              "type": "Expression"
-            },
+            "sqlReaderQuery": "SELECT * FROM etl.pipeline_metadata\nWHERE is_active = 1\n  AND (\n       '@{pipeline().parameters.target_filter}' = ''\n       OR ',@{pipeline().parameters.target_filter},' LIKE CONCAT('%,', target_table, ',%')\n  )\n",
             "partitionOption": "None"
           },
           "datasetSettings": {
             "type": "LakehouseTable",
             "schema": [],
             "connectionSettings": {
-              "name": "lh_wwi",
+              "name": "bb1482e7_7476_4cdd_a035_91e350410be6",
               "properties": {
                 "type": "Lakehouse",
                 "typeProperties": {
-                  "artifactId": "2c9cd4af-2fb7-9d4a-43a4-a97f3748fa11",
-                  "workspaceId": "00000000-0000-0000-0000-000000000000",
+                  "artifactId": "@pipeline().libraryVariables.vl_wwi_lakehouse_id",
+                  "workspaceId": "@pipeline().libraryVariables.vl_wwi_workspace_id",
                   "rootFolder": "Tables"
                 },
                 "externalReferences": {
-                  "connection": "dae0ef8e-5d67-4a3c-9ebe-fd1438c8c3cd"
+                  "connection": "@pipeline().libraryVariables.vl_wwi_lakehouse_connection_id"
                 },
                 "annotations": []
               }

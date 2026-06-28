@@ -247,7 +247,7 @@ from pyspark.sql.types import (
         .addColumn("stockitem_skey",            IntegerType(), nullable=False)
         .addColumn("invoice_date_key",          IntegerType(), nullable=False)
 
-        # Natural keys of dims (kept for traceability per BizOne pattern)
+        # Natural keys of dims
         .addColumn("CustomerID",                IntegerType())
         .addColumn("StockItemID",               IntegerType())
 
@@ -289,6 +289,107 @@ print("gold.fact_invoiceline table created (empty)")
 
 spark.read.table("gold.fact_invoiceline").printSchema()
 print(f"Row count: {spark.read.table('gold.fact_invoiceline').count()}")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+from pyspark.sql.functions import col, max as spark_max, countDistinct
+
+print("=" * 70)
+print(" MEDALLION STATUS CHECK")
+print("=" * 70)
+
+# ============================================================
+# BRONZE LAYER (parquet files)
+# ============================================================
+print("\n=== BRONZE (parquet files) ===")
+bronze_expected = {
+    "wwi_customers": 663,
+    "wwi_stockitems": 227,
+    "wwi_invoices": 70510,
+    "wwi_invoicelines": 228265,
+}
+
+for tbl, expected_per_batch in bronze_expected.items():
+    try:
+        df = spark.read.option("recursiveFileLookup", "true").parquet(f"Files/bronze/{tbl}/")
+        total = df.count()
+        n_batches = df.select("audit_ts").distinct().count()
+        latest = df.agg(spark_max("audit_ts").alias("m")).first()["m"]
+        print(f"  {tbl:30s} | rows={total:>10,} | batches={n_batches} | latest={latest}")
+    except Exception as e:
+        print(f"  {tbl:30s} | ❌ ERROR: {e}")
+
+# ============================================================
+# SILVER LAYER (delta tables)
+# ============================================================
+print("\n=== SILVER (delta tables) ===")
+silver_checks = [
+    ("silver.wwi_customers",    "CustomerID",     663),
+    ("silver.wwi_stockitems",   "StockItemID",    227),
+    ("silver.wwi_invoices",     "InvoiceID",      70510),
+    ("silver.wwi_invoicelines", "InvoiceLineID",  228265),
+]
+
+for tbl, key, expected in silver_checks:
+    try:
+        total = spark.sql(f"SELECT COUNT(*) FROM {tbl}").first()[0]
+        active = spark.sql(f"SELECT COUNT(DISTINCT {key}) FROM {tbl} WHERE deleted_audit_ts IS NULL").first()[0]
+        deleted = spark.sql(f"SELECT COUNT(DISTINCT {key}) FROM {tbl} WHERE deleted_audit_ts IS NOT NULL").first()[0]
+        latest = spark.sql(f"SELECT MAX(audit_ts) FROM {tbl}").first()[0]
+        status = "✅" if active == expected else "❌"
+        print(f"  {status} {tbl:32s} | total={total:>8,} | active={active:>6,} | deleted={deleted} | expected={expected} | latest={latest}")
+    except Exception as e:
+        print(f"  ❌ {tbl:32s} ERROR: {e}")
+
+print("\n=== GOLD ===")
+gold_checks = [
+    ("gold.dim_customer",       664,     True),    # has audit_ts
+    ("gold.dim_stockitem",      228,     True),    # has audit_ts
+    ("gold.dim_date",           7671,    False),   # ← static calendar, no audit_ts
+    ("gold.fact_invoiceline",   228265,  True),    # has audit_ts
+]
+
+for tbl, expected, has_audit in gold_checks:
+    try:
+        total = spark.sql(f"SELECT COUNT(*) FROM {tbl}").first()[0]
+        latest = spark.sql(f"SELECT MAX(audit_ts) FROM {tbl}").first()[0] if has_audit else "(static)"
+        status = "✅" if total == expected else "⚠️"
+        print(f"  {status} {tbl:32s} | rows={total:>8,} | expected={expected} | latest={latest}")
+    except Exception as e:
+        print(f"  ❌ {tbl:32s} ERROR: {e}")
+
+
+# ============================================================
+# GOLD SCD2 — dim_customer detail
+# ============================================================
+print("\n=== GOLD SCD2 — dim_customer breakdown ===")
+try:
+    scd_summary = spark.sql("""
+        SELECT 
+            COUNT(*) AS total_rows,
+            COUNT(DISTINCT CustomerID) AS distinct_keys,
+            SUM(CASE WHEN scd_active = 1 THEN 1 ELSE 0 END) AS active_versions,
+            SUM(CASE WHEN scd_active = 0 THEN 1 ELSE 0 END) AS expired_versions,
+            SUM(CASE WHEN customer_skey = -1 THEN 1 ELSE 0 END) AS default_rows,
+            MAX(scd_version) AS max_versions_per_key
+        FROM gold.dim_customer
+    """).first()
+    print(f"  total_rows           = {scd_summary['total_rows']}")
+    print(f"  distinct CustomerIDs = {scd_summary['distinct_keys']}")
+    print(f"  active_versions      = {scd_summary['active_versions']}")
+    print(f"  expired_versions     = {scd_summary['expired_versions']}")
+    print(f"  default_rows (-1)    = {scd_summary['default_rows']}")
+    print(f"  max scd_version      = {scd_summary['max_versions_per_key']}")
+except Exception as e:
+    print(f"  ❌ ERROR: {e}")
+
 
 # METADATA ********************
 
